@@ -53,25 +53,24 @@ is centred and the surround is blanked, so every screen lines up exactly.
 
 ### Option A — one command (recommended)
 
-Everything is bundled into a single self-extracting file, `install.lua`. It
-carries all 30 files inside it, so nothing is downloaded and it works even on a
-computer with HTTP disabled.
+Everything is bundled into a single self-extracting file, `install.lua`, which
+carries all 30 files inside it. One line in game:
 
-Paste `install.lua` into pastebin.com, then in game:
+```
+wget run https://raw.githubusercontent.com/levisnakes/cc-gameos/main/install.lua
+```
+
+If HTTP is disabled on your computer, paste `install.lua` into pastebin.com
+instead and run:
 
 ```
 pastebin get <code> install
 install
 ```
 
-Or, if this repository is hosted somewhere:
-
-```
-wget run https://raw.githubusercontent.com/<user>/<repo>/main/install.lua
-```
-
 Either way it unpacks the console and tells you to reboot. `install <folder>`
-unpacks somewhere else instead of the computer root.
+unpacks somewhere else instead of the computer root, and re-running it later
+overwrites in place, so that is also how you update.
 
 The bundle is about 279 KB, comfortably inside pastebin's limit.
 
