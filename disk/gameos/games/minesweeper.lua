@@ -154,7 +154,7 @@ function Game:reveal(x, y)
     return
   end
   self:flood(x, y)
-  audio.play("reveal")
+  audio.play("ms.reveal")
   self:checkWin()
 end
 
@@ -164,7 +164,7 @@ function Game:toggleFlag(x, y)
   if not cell or cell.shown then return end
   cell.flag = not cell.flag
   self.flags = self.flags + (cell.flag and 1 or -1)
-  audio.play("flag")
+  audio.play(cell.flag and "ms.flag" or "ms.unflag")
 end
 
 function Game:chord(x, y)
@@ -174,7 +174,7 @@ function Game:chord(x, y)
   local flags = 0
   self:neighbours(x, y, function(other) if other.flag then flags = flags + 1 end end)
   if flags ~= cell.adj then
-    audio.play("deny")
+    audio.play("ui.deny")
     return
   end
   local blown = false
@@ -192,7 +192,7 @@ function Game:chord(x, y)
   if blown then
     self:lose()
   else
-    audio.play("reveal")
+    audio.play("ms.chord")
     self:checkWin()
   end
 end
@@ -211,7 +211,7 @@ function Game:checkWin()
     end
     local speed = max(0, 600 - floor(self.time)) * 5
     self.score = self.revealed * 10 + self.bonus + speed
-    audio.play("win")
+    audio.play("ms.clear")
   else
     self.score = self.revealed * 10
   end
@@ -225,7 +225,7 @@ function Game:lose()
     local cell = self.cells[i]
     if cell.mine then cell.shown = true end
   end
-  audio.play("explode")
+  audio.play("ms.boom")
 end
 
 --------------------------------------------------------------------- input
@@ -391,6 +391,7 @@ return {
   accent = colors.lightBlue,
   order = 50,
   cover = cover,
+  music = "quiet",
   controls = {
     { "Arrows / WASD", "Move cursor" },
     { "Space", "Reveal / chord" },

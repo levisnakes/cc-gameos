@@ -156,7 +156,7 @@ function Game:move(dir)
   end
 
   if not changed then
-    audio.play("deny")
+    audio.play("g2048.deny")
     return false
   end
 
@@ -168,9 +168,10 @@ function Game:move(dir)
   self.slides = slides
   self.slideTime = SLIDE_TIME
   if gained > 0 then
-    audio.play("merge", min(8, floor(gained / 64)))
+    -- bigger merges ring higher
+    audio.play("g2048.merge", min(10, floor(gained / 32)))
   else
-    audio.play("slide")
+    audio.play("g2048.slide")
   end
   return true
 end
@@ -196,11 +197,11 @@ function Game:afterMove()
     self.reached2048 = true
     self.won = true
     self:say("2048! KEEP GOING")
-    audio.play("win")
+    audio.play("result.win")
   end
   if not self:hasMove() then
     self.finished = true
-    audio.play("gameover")
+    audio.play("result.lose")
   end
 end
 
@@ -221,7 +222,7 @@ end
 function Game:undo()
   if self.slideTime > 0 then return end
   if not self.undoGrid then
-    audio.play("deny")
+    audio.play("g2048.deny")
     return
   end
   for i = 1, N * N do self.grid[i] = self.undoGrid[i] end
@@ -229,7 +230,7 @@ function Game:undo()
   self.undoGrid = nil
   self.finished = false
   self.moves = math.max(0, self.moves - 1)
-  audio.play("undo")
+  audio.play("g2048.undo")
   self:say("UNDO")
 end
 
@@ -376,6 +377,7 @@ return {
   accent = colors.yellow,
   order = 60,
   cover = cover,
+  music = "quiet",
   controls = {
     { "Arrows / WASD", "Slide tiles" },
     { "U", "Undo one move" },

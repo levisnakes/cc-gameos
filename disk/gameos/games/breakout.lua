@@ -244,7 +244,7 @@ function Game:release()
       local ang = -1.0
       b.vx = math.cos(ang) * b.speed
       b.vy = -math.abs(math.sin(ang)) * b.speed
-      audio.play("bounce")
+      audio.play("brk.launch")
     end
   end
 end
@@ -275,7 +275,7 @@ function Game:fire()
   self.laserShots = self.laserShots - 1
   self.bolts[#self.bolts + 1] = { x = self.paddleX + 1, y = PADDLE_Y - 3 }
   self.bolts[#self.bolts + 1] = { x = self.paddleX + self.paddleW - 2, y = PADDLE_Y - 3 }
-  audio.play("laser")
+  audio.play("brk.laser")
 end
 
 ------------------------------------------------------------------- bricks
@@ -293,20 +293,21 @@ function Game:hitBrick(row, col)
   local brick = self.bricks[row][col]
   if not brick then return false end
   if brick.hp < 0 then
-    audio.play("thud")
+    audio.play("brk.steel")
     return true
   end
   brick.hp = brick.hp - 1
   if brick.hp > 0 then
     brick.colour = TOUGH_COLOUR[min(#TOUGH_COLOUR, brick.hp)]
-    audio.play("thud")
+    audio.play("brk.tough")
     return true
   end
   self.bricks[row][col] = false
   self.remaining = self.remaining - 1
   self.bricksBroken = self.bricksBroken + 1
   self.score = self.score + brick.value * self.levelIndex
-  audio.play("hit")
+  -- higher rows ring higher, so the wall plays a scale as it comes down
+  audio.play("brk.brick", (ROWS - row) * 2)
   if math.random(1, 100) <= 14 then
     local p = rollPower()
     self.drops[#self.drops + 1] = {
@@ -320,7 +321,7 @@ end
 
 ------------------------------------------------------------------ powerups
 function Game:applyPower(p)
-  audio.play("powerup")
+  audio.play(p.id == "narrow" and "brk.penalty" or "brk.powerup")
   self:say(p.id:upper())
   if p.id == "wide" then
     self.paddleW = min(30, self.paddleW + 6)
@@ -385,12 +386,12 @@ function Game:ballStep(b, dt)
       nx = FIELD_L
       b.vx = math.abs(b.vx)
       sx = -sx
-      audio.play("bounce")
+      audio.play("brk.wall")
     elseif nx + 1 > FIELD_R then
       nx = FIELD_R - 1
       b.vx = -math.abs(b.vx)
       sx = -sx
-      audio.play("bounce")
+      audio.play("brk.wall")
     end
     local hitX = false
     for _, corner in ipairs(CORNERS) do
@@ -414,7 +415,7 @@ function Game:ballStep(b, dt)
       ny = FIELD_T
       b.vy = math.abs(b.vy)
       sy = -sy
-      audio.play("bounce")
+      audio.play("brk.wall")
     end
     local hitY = false
     for _, corner in ipairs(CORNERS) do
@@ -454,7 +455,7 @@ function Game:ballStep(b, dt)
           b.stuck = true
           b.vx, b.vy = 0, 0
         end
-        audio.play("bounce")
+        audio.play("brk.paddle")
         return
       end
     end
@@ -483,7 +484,7 @@ function Game:update(dt)
 
   if #self.balls == 0 then
     self.lives = self.lives - 1
-    audio.play("gameover")
+    audio.play("brk.life")
     if self.lives <= 0 then
       self.finished = true
       return
@@ -527,10 +528,10 @@ function Game:update(dt)
     if self.levelIndex > #LEVELS then
       self.won = true
       self.finished = true
-      audio.play("win")
+      audio.play("result.win")
       return
     end
-    audio.play("levelup")
+    audio.play("result.levelup")
     self:loadLevel()
   end
 end
@@ -638,6 +639,7 @@ return {
   accent = colors.orange,
   order = 30,
   cover = cover,
+  music = "ricochet",
   controls = {
     { "Left / Right", "Move paddle" },
     { "Mouse", "Move paddle" },

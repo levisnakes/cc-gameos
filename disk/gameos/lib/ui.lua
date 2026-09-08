@@ -136,16 +136,16 @@ function ui.dialog(opts)
       local k = ev[2]
       if k == keys.left or k == keys.a then
         sel = sel > 1 and sel - 1 or #buttons
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.right or k == keys.d or k == keys.tab then
         sel = sel < #buttons and sel + 1 or 1
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
-        audio.play("select")
+        audio.play("ui.select")
         return sel
       elseif k == keys.backspace or k == keys.q then
         if opts.cancel ~= 0 then
-          audio.play("back")
+          audio.play("ui.back")
           return opts.cancel or 0
         end
       end
@@ -154,7 +154,7 @@ function ui.dialog(opts)
       local i = hitTest(rects, mx, my)
       if i then
         sel = i
-        audio.play("select")
+        audio.play("ui.select")
         return i
       end
     end
@@ -261,10 +261,10 @@ function ui.picker(opts)
       local k = ev[2]
       if k == keys.up or k == keys.w then
         sel = sel > 1 and sel - 1 or #items
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.down or k == keys.s then
         sel = sel < #items and sel + 1 or 1
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.pageUp then
         sel = math.max(1, sel - rows)
       elseif k == keys.pageDown then
@@ -274,10 +274,10 @@ function ui.picker(opts)
       elseif k == keys["end"] then
         sel = #items
       elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
-        audio.play("select")
+        audio.play("ui.select")
         return sel
       elseif k == keys.backspace or k == keys.q then
-        audio.play("back")
+        audio.play("ui.back")
         return 0
       end
     elseif name == "mouse_scroll" then
@@ -290,14 +290,14 @@ function ui.picker(opts)
         local i = top + row
         if i <= #items then
           if i == sel then
-            audio.play("select")
+            audio.play("ui.select")
             return i
           end
           sel = i
-          audio.play("move")
+          audio.play("ui.move")
         end
       elseif mx < x or mx >= x + w or my < y or my >= y + h then
-        audio.play("back")
+        audio.play("ui.back")
         return 0
       end
     end
@@ -402,17 +402,17 @@ function ui.initials(title, accent, previous)
       if at then
         letters[slot] = at
         if slot < 3 then slot = slot + 1 end
-        audio.play("move")
+        audio.play("ui.move")
       end
       return nil
     end
     local k = ev[2]
     if k == keys.up or k == keys.w then
       letters[slot] = letters[slot] % #ALPHABET + 1
-      audio.play("move")
+      audio.play("ui.move")
     elseif k == keys.down or k == keys.s then
       letters[slot] = (letters[slot] - 2) % #ALPHABET + 1
-      audio.play("move")
+      audio.play("ui.move")
     elseif k == keys.left or k == keys.a then
       slot = slot > 1 and slot - 1 or 3
     elseif k == keys.right or k == keys.d or k == keys.tab then
@@ -420,7 +420,7 @@ function ui.initials(title, accent, previous)
     elseif k == keys.backspace then
       letters[slot] = 1
     elseif k == keys.enter or k == keys.numPadEnter or k == keys.space then
-      audio.play("select")
+      audio.play("ui.select")
       return text()
     end
     return nil

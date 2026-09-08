@@ -126,7 +126,7 @@ function trophies.run(api)
       elseif k == keys["end"] then
         top = maxTop
       elseif k == keys.backspace or k == keys.q or k == keys.enter then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     elseif ev[1] == "mouse_scroll" then
@@ -134,7 +134,7 @@ function trophies.run(api)
     elseif ev[1] == "mouse_click" then
       local _, my = ui.toLocal(ev[3], ev[4])
       if my >= 18 then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     end

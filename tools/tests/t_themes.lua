@@ -77,6 +77,7 @@ local function screenshotScreen(name, fn)
 end
 
 screenshotScreen("settings", function(a) req("os.settings").run(a) end)
+screenshotScreen("soundtest", function(a) req("os.soundtest").run(a) end)
 screenshotScreen("scores", function(a) req("os.scores").run(a) end)
 screenshotScreen("about", function(a) req("os.about").run(a) end)
 

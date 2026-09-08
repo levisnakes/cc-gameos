@@ -162,7 +162,7 @@ function shell.run(api)
       i = i + dir
       if i < 1 then i = #entries elseif i > #entries then i = 1 end
       if selectable(entries[i]) then
-        if i ~= sel then audio.play("move") end
+        if i ~= sel then audio.play("ui.move") end
         sel = i
         return
       end
@@ -181,7 +181,7 @@ function shell.run(api)
           i = i % n + 1
           if selectable(entries[i]) then
             sel = i
-            audio.play("select")
+            audio.play("ui.select")
             return
           end
         end
@@ -319,21 +319,21 @@ function shell.run(api)
 
   local function launch(e)
     if e.kind == "game" then
-      audio.play("select")
+      audio.play("ui.select")
       ui.transition(e.def.accent or colors.lightBlue)
       api.runtime.play(e.def, api)
       ui.transition(e.def.accent or colors.lightBlue)
     elseif e.id == "scores" then
-      audio.play("select")
+      audio.play("ui.select")
       req("os.scores").run(api)
     elseif e.id == "trophies" then
-      audio.play("select")
+      audio.play("ui.select")
       req("os.trophies").run(api)
     elseif e.id == "settings" then
-      audio.play("select")
+      audio.play("ui.select")
       req("os.settings").run(api)
     elseif e.id == "about" then
-      audio.play("select")
+      audio.play("ui.select")
       req("os.about").run(api)
     elseif e.id == "power" then
       if (not data.get("confirmExit")) or ui.confirm(" Power Off ", "Leave GameOS?", "Power off", "Stay") then
@@ -343,7 +343,7 @@ function shell.run(api)
     end
     ui.terminated = false
     -- the runtime stops the menu track while a game is running
-    audio.playMusic("menu")
+    audio.playMusic("standby")
     os.cancelTimer(timer)
     timer = os.startTimer(FRAME)
     idle = 0
@@ -360,14 +360,14 @@ function shell.run(api)
       local e = entries[i]
       if selectable(e) and labelOf(e):sub(1, 1):lower() == ch then
         sel = i
-        audio.play("move")
+        audio.play("ui.move")
         return true
       end
     end
     return false
   end
 
-  audio.playMusic("menu")
+  audio.playMusic("standby")
 
   while running do
     local ev = { os.pullEventRaw() }
@@ -445,7 +445,7 @@ function shell.run(api)
               launch(e)
             else
               sel = i
-              audio.play("move")
+              audio.play("ui.move")
             end
           end
         elseif mx >= PANEL_X then

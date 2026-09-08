@@ -167,14 +167,14 @@ end
 function Game:place(col, player)
   local row = self:openRow(col)
   if not row then
-    audio.play("deny")
+    audio.play("c4.full")
     return false
   end
   self.board[idx(col, row)] = player
   self.heights[col] = self.heights[col] + 1
   self.moves = self.moves + 1
   self.dropAnim = { col = col, row = row, t = 0.18 }
-  audio.play("thud")
+  audio.play("c4.drop")
 
   local winner, line = winnerAt(self.board)
   if winner then
@@ -193,7 +193,7 @@ function Game:place(col, player)
     else
       self.score = 0
     end
-    audio.play(self.won and "win" or "gameover")
+    audio.play(self.won and "c4.win" or "c4.lose")
     return true
   end
 
@@ -202,7 +202,7 @@ function Game:place(col, player)
     self.won = false
     self.message = "A DRAW"
     self.score = 250
-    audio.play("levelup")
+    audio.play("c4.draw")
     return true
   end
 
@@ -302,10 +302,10 @@ function Game:onKey(code, held)
   if self.finished then return end
   if code == keys.left or code == keys.a then
     self.cursor = self.cursor > 1 and self.cursor - 1 or COLS
-    audio.play("move")
+    audio.play("c4.move")
   elseif code == keys.right or code == keys.d then
     self.cursor = self.cursor < COLS and self.cursor + 1 or 1
-    audio.play("move")
+    audio.play("c4.move")
   elseif not held and (code == keys.space or code == keys.enter
       or code == keys.down or code == keys.s) then
     if self.twoPlayer or self.turn == HUMAN then
@@ -448,6 +448,7 @@ return {
   accent = colors.blue,
   order = 130,
   cover = cover,
+  music = "gambit",
   controls = {
     { "Left / Right", "Choose a column" },
     { "1 - 7", "Jump to a column" },

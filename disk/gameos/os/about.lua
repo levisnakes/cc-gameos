@@ -61,11 +61,11 @@ function about.run(api)
         end
         ui.alert(" Load errors ", body, colors.red)
       elseif k == keys.backspace or k == keys.q or k == keys.enter or k == keys.space then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     elseif ev[1] == "mouse_click" then
-      audio.play("back")
+      audio.play("ui.back")
       return 1
     end
     return nil

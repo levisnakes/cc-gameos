@@ -67,8 +67,7 @@ end
 function Game:flash(index, duration)
   self.litPanel = index
   self.litTimer = duration or 0.3
-  local panel = PANELS[index]
-  audio.note("harp", panel.pitch, 0.7)
+  audio.play("sim.pad" .. index)
 end
 
 --------------------------------------------------------------------- input
@@ -82,7 +81,7 @@ function Game:pressPanel(index)
     self.state = "wrong"
     self.wrongTimer = 0.9
     self.message = "wrong"
-    audio.play("deny")
+    audio.play("sim.wrong")
     return
   end
 
@@ -91,7 +90,7 @@ function Game:pressPanel(index)
     self.state = "clear"
     self.clearTimer = 0.5
     self.message = "good"
-    audio.play("coin", math.min(10, self.round))
+    audio.play("sim.round")
   end
 end
 
@@ -152,7 +151,7 @@ function Game:update(dt)
       if self.lives <= 0 then
         self.finished = true
         self.won = self.round > 8
-        audio.play("gameover")
+        audio.play("result.lose")
       else
         -- replay the same sequence from the top
         self.state = "wait"
@@ -243,6 +242,8 @@ return {
   accent = colors.lime,
   order = 120,
   cover = cover,
+  -- no soundtrack: the sequence is the point
+  music = false,
   scoreLabel = "SCORE",
   controls = {
     { "Q / W", "Top panels" },

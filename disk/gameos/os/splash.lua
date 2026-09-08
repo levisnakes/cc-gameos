@@ -28,7 +28,7 @@ function splash.run(api)
   end
   local shades = { colors.gray, colors.lightGray, colors.white }
 
-  audio.play("boot")
+  audio.play("boot.chime")
 
   local t = 0
   local timer = os.startTimer(0.05)

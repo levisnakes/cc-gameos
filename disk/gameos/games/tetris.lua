@@ -215,7 +215,7 @@ function Game:spawn(kind)
       self.py = self.py - 1
     else
       self.finished = true
-      audio.play("explode")
+      audio.play("tet.topout")
     end
   end
 end
@@ -267,11 +267,11 @@ function Game:rotate(dir)
         self.lockResets = self.lockResets + 1
         self.lockTimer = 0
       end
-      audio.play("blip")
+      audio.play(i > 1 and "tet.wallkick" or "tet.rotate")
       return true
     end
   end
-  audio.play("deny")
+  audio.play("tet.deny")
   return false
 end
 
@@ -287,7 +287,7 @@ end
 
 function Game:swapHold()
   if self.holdUsed or self.finished or self.clearRows then
-    audio.play("deny")
+    audio.play("tet.deny")
     return
   end
   local previous = self.hold
@@ -298,7 +298,7 @@ function Game:swapHold()
   else
     self:spawn()
   end
-  audio.play("select")
+  audio.play("tet.hold")
 end
 
 function Game:hardDrop()
@@ -308,6 +308,7 @@ function Game:hardDrop()
   self.py = target
   self.score = self.score + dist * 2
   self.lastMoveWasRotation = false
+  audio.play("tet.harddrop")
   self:lock()
 end
 
@@ -413,12 +414,16 @@ function Game:lock()
     self.clearRows = full
     self.clearTimer = 0.24
     self.lastClear = label or (n .. (n == 1 and " LINE" or " LINES"))
-    audio.play(n == 4 and "clear" or "eat", n == 4 and 0 or -4)
+    -- the clear fanfare grows with the number of rows
+    local voice = "tet.line" .. n
+    if tspin then voice = "tet.tspin" elseif n >= 4 then voice = "tet.tetris" end
+    audio.play(voice)
+    if difficult and self.backToBack then audio.play("tet.b2b") end
   else
-    audio.play("lock")
+    audio.play("tet.lock")
     if topOut then
       self.finished = true
-      audio.play("explode")
+      audio.play("tet.topout")
       return
     end
     self.holdUsed = false
@@ -442,7 +447,7 @@ function Game:collapse()
   local newLevel = self.startLevel + floor(self.lines / 10)
   if newLevel > self.level then
     self.level = newLevel
-    audio.play("levelup")
+    audio.play("result.levelup")
   end
   self.holdUsed = false
   self:spawn()
@@ -482,11 +487,11 @@ function Game:update(dt)
 
   local steps = self.dasLeft:update(input.down(keys.left, keys.a), dt)
   for _ = 1, steps do
-    if self:tryMove(-1, 0) then audio.play("move") end
+    if self:tryMove(-1, 0) then audio.play("tet.move") end
   end
   steps = self.dasRight:update(input.down(keys.right, keys.d), dt)
   for _ = 1, steps do
-    if self:tryMove(1, 0) then audio.play("move") end
+    if self:tryMove(1, 0) then audio.play("tet.move") end
   end
 
   local soft = input.down(keys.down, keys.s)
@@ -686,6 +691,7 @@ return {
   accent = colors.cyan,
   order = 20,
   cover = cover,
+  music = "cascade",
   controls = {
     { "Left / Right", "Move" },
     { "Down", "Soft drop" },

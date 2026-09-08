@@ -188,7 +188,7 @@ function Game:fire()
   local limit = self.wave >= 3 and 2 or 1
   if #self.shots >= limit then return end
   self.shots[#self.shots + 1] = { x = self.playerX + 4, y = PLAYER_Y - 1 }
-  audio.play("laser")
+  audio.play("inv.shoot")
 end
 
 -------------------------------------------------------------------- update
@@ -240,12 +240,14 @@ function Game:advanceFormation()
   end
   if drop then self.dir = -self.dir end
   self.frame = 3 - self.frame
-  audio.note("bass", 4 + (self.frame == 1 and 0 or 2), 0.22)
+  -- the march walks down four steps, the way the original does
+  self.marchStep = (self.marchStep or 0) % 4 + 1
+  audio.play("inv.march" .. self.marchStep)
 
   if maxY + (drop and STEP_Y or 0) >= PLAYER_Y then
     self.lives = 0
     self.finished = true
-    audio.play("explode")
+    audio.play("inv.die")
   end
 end
 
@@ -311,14 +313,14 @@ function Game:update(dt)
     local hit = false
     if self:shieldHit(floor(b.x), floor(b.y), true) then
       hit = true
-      audio.play("thud")
+      audio.play("inv.shield")
     elseif b.y >= PLAYER_Y and b.y <= PLAYER_Y + 5 and self.respawn <= 0 and
            b.x >= self.playerX and b.x <= self.playerX + 9 then
       hit = true
       self.lives = self.lives - 1
       self.respawn = 1.4
       self:boom(self.playerX + 4, PLAYER_Y + 2, colors.orange, 16)
-      audio.play("explode")
+      audio.play("inv.die")
       for j = #self.bombs, 1, -1 do table.remove(self.bombs, j) end
       break
     elseif b.y > FIELD_H then
@@ -339,10 +341,10 @@ function Game:update(dt)
       self:boom(self.ufo.x + 5, 3, colors.magenta, 14)
       self.ufo = nil
       gone = true
-      audio.play("coin")
+      audio.play("inv.ufohit")
     elseif self:shieldHit(floor(s.x), floor(s.y), true) then
       gone = true
-      audio.play("thud")
+      audio.play("inv.shield")
     else
       for k = 1, #self.aliens do
         local a = self.aliens[k]
@@ -353,7 +355,8 @@ function Game:update(dt)
           local kind = ALIEN_KIND[a.row]
           self.score = self.score + kind.value * (1 + floor((self.wave - 1) / 2))
           self:boom(a.x + 4, a.y + 2, kind.colour, 10)
-          audio.play("hit")
+          -- the front rows are the low, fat ones
+          audio.play("inv.hit", (ROWS - a.row) * 2)
           gone = true
           break
         end
@@ -375,7 +378,7 @@ function Game:update(dt)
   if self.alive <= 0 then
     self.score = self.score + 200 * self.wave
     self.wave = self.wave + 1
-    audio.play("levelup")
+    audio.play("result.newwave")
     self.shots = {}
     self.bombs = {}
     self:startWave()
@@ -480,6 +483,7 @@ return {
   accent = colors.lime,
   order = 40,
   cover = cover,
+  music = "descent",
   controls = {
     { "Left / Right", "Move" },
     { "Space", "Fire" },

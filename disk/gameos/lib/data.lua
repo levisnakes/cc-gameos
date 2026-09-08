@@ -13,9 +13,10 @@ local MAX_SCORES = 5
 
 local DEFAULT_SETTINGS = {
   theme = "midnight",
-  sfx = true,
-  music = false,
-  volume = 1,
+  -- three independent knobs, 0..10
+  volMaster = 7,
+  volMusic = 6,
+  volSfx = 10,
   showFps = false,
   confirmExit = true,
 }

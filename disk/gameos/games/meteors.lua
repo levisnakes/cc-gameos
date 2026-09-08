@@ -127,7 +127,7 @@ function Game:fire()
     vy = s.vy + sin(s.angle) * 78,
     life = 1.05,
   }
-  audio.play("laser")
+  audio.play("met.fire")
 end
 
 function Game:hyperspace()
@@ -138,7 +138,7 @@ function Game:hyperspace()
   self.ship.y = math.random(6, H - 6)
   self.ship.vx, self.ship.vy = 0, 0
   self.invuln = max(self.invuln, 0.9)
-  audio.play("powerup")
+  audio.play("met.hyper")
 end
 
 function Game:onKey(code, held)
@@ -156,7 +156,7 @@ function Game:hitShip()
   self.dead = true
   self.lives = self.lives - 1
   self:boom(self.ship.x, self.ship.y, 22, colors.cyan)
-  audio.play("explode")
+  audio.play("met.die")
   self.deadTimer = 1.5
 end
 
@@ -165,7 +165,7 @@ function Game:splitRock(index)
   self.score = self.score + SIZE_SCORE[rock.size]
   self.rocksShot = self.rocksShot + 1
   self:boom(rock.x, rock.y, 6 + rock.size * 3, colors.lightGray)
-  audio.play("hit", rock.size * 3)
+  audio.play("met.rock" .. rock.size)
   table.remove(self.rocks, index)
   if rock.size > 1 then
     for _ = 1, 2 do
@@ -250,7 +250,7 @@ function Game:update(dt)
           self:boom(self.ufo.x, self.ufo.y, 16, colors.magenta)
           self.ufo = nil
           hit = true
-          audio.play("coin")
+          audio.play("met.ufohit")
         end
       end
       if hit then table.remove(self.bullets, i) end
@@ -291,7 +291,7 @@ function Game:update(dt)
         x = u.x, y = u.y, vx = dx / d * 52, vy = dy / d * 52,
         life = 1.4, hostile = true,
       }
-      audio.play("blip")
+      audio.play("met.ufo")
     end
     if u.x < -6 or u.x > W + 6 then self.ufo = nil end
     if not self.dead and self.invuln <= 0 then
@@ -322,7 +322,7 @@ function Game:update(dt)
 
   if #self.rocks == 0 then
     self.score = self.score + 250 * self.wave
-    audio.play("levelup")
+    audio.play("result.newwave")
     self:nextWave()
   end
 end
@@ -470,6 +470,7 @@ return {
   accent = colors.lightGray,
   order = 100,
   cover = cover,
+  music = "drift",
   controls = {
     { "Left / Right", "Rotate" },
     { "Up", "Thrust" },

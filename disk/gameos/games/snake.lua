@@ -142,7 +142,7 @@ end
 function Game:die()
   if self.dying > 0 then return end
   self.dying = 0.9
-  audio.play("explode")
+  audio.play("snake.die")
 end
 
 function Game:step()
@@ -190,7 +190,8 @@ function Game:step()
     self.score = self.score + 10 * self.level
     self.interval = math.max(0.055, 0.135 - self.apples * 0.0022)
     self.flash = 0.12
-    audio.play("eat", math.min(8, floor(self.apples / 2)))
+    -- the chirp climbs as the snake grows
+    audio.play("snake.eat", math.min(8, floor(self.apples / 2)))
     self:spawnFood()
     self.bonusIn = self.bonusIn - 1
     if self.bonusIn <= 0 and not self.bonus then
@@ -203,7 +204,7 @@ function Game:step()
     self.grow = self.grow + 3
     self.bonus = nil
     self.flash = 0.2
-    audio.play("coin")
+    audio.play("snake.bonus")
   end
 end
 
@@ -360,6 +361,7 @@ return {
   accent = colors.lime,
   order = 10,
   cover = cover,
+  music = "serpentine",
   controls = {
     { "Arrows/WASD", "Turn" },
     { "P", "Pause menu" },

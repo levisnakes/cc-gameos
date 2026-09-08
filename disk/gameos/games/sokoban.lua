@@ -274,29 +274,29 @@ function Game:step(dx, dy)
   if nx < 1 or nx > self.w or ny < 1 or ny > self.h then return end
   local nk = self:key(nx, ny)
   if self.walls[nk] then
-    audio.play("deny")
+    audio.play("sok.blocked")
     return
   end
 
   if self.boxes[nk] then
     local bx, by = nx + dx, ny + dy
     if bx < 1 or bx > self.w or by < 1 or by > self.h then
-      audio.play("deny")
+      audio.play("sok.blocked")
       return
     end
     local bk = self:key(bx, by)
     if self.walls[bk] or self.boxes[bk] then
-      audio.play("deny")
+      audio.play("sok.blocked")
       return
     end
     self:snapshot()
     self.boxes[nk] = nil
     self.boxes[bk] = true
     self.pushes = self.pushes + 1
-    audio.play(self.goals[bk] and "coin" or "push")
+    audio.play(self.goals[bk] and "sok.ongoal" or "sok.push")
   else
     self:snapshot()
-    audio.play("step")
+    audio.play("sok.step")
   end
 
   self.px, self.py = nx, ny
@@ -318,26 +318,26 @@ function Game:step(dx, dy)
     prog.level = math.min(#LEVELS, self.index + 1)
     if self.index >= #LEVELS then prog.completed = true end
     data.markDirty()
-    audio.play("win")
+    audio.play("sok.solved")
   end
 end
 
 function Game:undo()
   local prev = table.remove(self.history)
   if not prev then
-    audio.play("deny")
+    audio.play("sok.blocked")
     return
   end
   self.px, self.py = prev.px, prev.py
   self.boxes = prev.boxes
   self.moves = prev.moves
   self.pushes = prev.pushes
-  audio.play("undo")
+  audio.play("sok.undo")
 end
 
 function Game:restart()
   self:load()
-  audio.play("back")
+  audio.play("sok.reset")
 end
 
 --------------------------------------------------------------------- input
@@ -493,6 +493,7 @@ return {
   accent = colors.orange,
   order = 70,
   cover = cover,
+  music = "quiet",
   scoreLabel = "BEST",
   controls = {
     { "Arrows / WASD", "Walk / push" },

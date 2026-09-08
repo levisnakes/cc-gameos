@@ -1,6 +1,6 @@
 --[[ GameOS installer -- the whole console in one file.
 
-  This writes 30 files and then you are done. Nothing is downloaded, so
+  This writes 33 files and then you are done. Nothing is downloaded, so
   it works on a computer with HTTP disabled.
 
     install            unpack into this computer
@@ -164,9 +164,9 @@ local finished, bootErr = pcall(function()
   data.load()
   gfx.applyTheme(gfx.themeByID(data.get("theme")))
   audio.init()
-  audio.sfxOn = data.get("sfx")
-  audio.musicOn = data.get("music")
-  audio.volume = data.get("volume")
+  audio.volumes.master = data.get("volMaster") / 10
+  audio.volumes.music = data.get("volMusic") / 10
+  audio.volumes.sfx = data.get("volSfx") / 10
 
   -------------------------------------------------------- game catalogue
   local games, broken = {}, {}
@@ -471,7 +471,7 @@ function Game:release()
       local ang = -1.0
       b.vx = math.cos(ang) * b.speed
       b.vy = -math.abs(math.sin(ang)) * b.speed
-      audio.play("bounce")
+      audio.play("brk.launch")
     end
   end
 end
@@ -502,7 +502,7 @@ function Game:fire()
   self.laserShots = self.laserShots - 1
   self.bolts[#self.bolts + 1] = { x = self.paddleX + 1, y = PADDLE_Y - 3 }
   self.bolts[#self.bolts + 1] = { x = self.paddleX + self.paddleW - 2, y = PADDLE_Y - 3 }
-  audio.play("laser")
+  audio.play("brk.laser")
 end
 
 ------------------------------------------------------------------- bricks
@@ -520,20 +520,21 @@ function Game:hitBrick(row, col)
   local brick = self.bricks[row][col]
   if not brick then return false end
   if brick.hp < 0 then
-    audio.play("thud")
+    audio.play("brk.steel")
     return true
   end
   brick.hp = brick.hp - 1
   if brick.hp > 0 then
     brick.colour = TOUGH_COLOUR[min(#TOUGH_COLOUR, brick.hp)]
-    audio.play("thud")
+    audio.play("brk.tough")
     return true
   end
   self.bricks[row][col] = false
   self.remaining = self.remaining - 1
   self.bricksBroken = self.bricksBroken + 1
   self.score = self.score + brick.value * self.levelIndex
-  audio.play("hit")
+  -- higher rows ring higher, so the wall plays a scale as it comes down
+  audio.play("brk.brick", (ROWS - row) * 2)
   if math.random(1, 100) <= 14 then
     local p = rollPower()
     self.drops[#self.drops + 1] = {
@@ -547,7 +548,7 @@ end
 
 ------------------------------------------------------------------ powerups
 function Game:applyPower(p)
-  audio.play("powerup")
+  audio.play(p.id == "narrow" and "brk.penalty" or "brk.powerup")
   self:say(p.id:upper())
   if p.id == "wide" then
     self.paddleW = min(30, self.paddleW + 6)
@@ -612,12 +613,12 @@ function Game:ballStep(b, dt)
       nx = FIELD_L
       b.vx = math.abs(b.vx)
       sx = -sx
-      audio.play("bounce")
+      audio.play("brk.wall")
     elseif nx + 1 > FIELD_R then
       nx = FIELD_R - 1
       b.vx = -math.abs(b.vx)
       sx = -sx
-      audio.play("bounce")
+      audio.play("brk.wall")
     end
     local hitX = false
     for _, corner in ipairs(CORNERS) do
@@ -641,7 +642,7 @@ function Game:ballStep(b, dt)
       ny = FIELD_T
       b.vy = math.abs(b.vy)
       sy = -sy
-      audio.play("bounce")
+      audio.play("brk.wall")
     end
     local hitY = false
     for _, corner in ipairs(CORNERS) do
@@ -681,7 +682,7 @@ function Game:ballStep(b, dt)
           b.stuck = true
           b.vx, b.vy = 0, 0
         end
-        audio.play("bounce")
+        audio.play("brk.paddle")
         return
       end
     end
@@ -710,7 +711,7 @@ function Game:update(dt)
 
   if #self.balls == 0 then
     self.lives = self.lives - 1
-    audio.play("gameover")
+    audio.play("brk.life")
     if self.lives <= 0 then
       self.finished = true
       return
@@ -754,10 +755,10 @@ function Game:update(dt)
     if self.levelIndex > #LEVELS then
       self.won = true
       self.finished = true
-      audio.play("win")
+      audio.play("result.win")
       return
     end
-    audio.play("levelup")
+    audio.play("result.levelup")
     self:loadLevel()
   end
 end
@@ -865,6 +866,7 @@ return {
   accent = colors.orange,
   order = 30,
   cover = cover,
+  music = "ricochet",
   controls = {
     { "Left / Right", "Move paddle" },
     { "Mouse", "Move paddle" },
@@ -1057,14 +1059,14 @@ end
 function Game:place(col, player)
   local row = self:openRow(col)
   if not row then
-    audio.play("deny")
+    audio.play("c4.full")
     return false
   end
   self.board[idx(col, row)] = player
   self.heights[col] = self.heights[col] + 1
   self.moves = self.moves + 1
   self.dropAnim = { col = col, row = row, t = 0.18 }
-  audio.play("thud")
+  audio.play("c4.drop")
 
   local winner, line = winnerAt(self.board)
   if winner then
@@ -1083,7 +1085,7 @@ function Game:place(col, player)
     else
       self.score = 0
     end
-    audio.play(self.won and "win" or "gameover")
+    audio.play(self.won and "c4.win" or "c4.lose")
     return true
   end
 
@@ -1092,7 +1094,7 @@ function Game:place(col, player)
     self.won = false
     self.message = "A DRAW"
     self.score = 250
-    audio.play("levelup")
+    audio.play("c4.draw")
     return true
   end
 
@@ -1192,10 +1194,10 @@ function Game:onKey(code, held)
   if self.finished then return end
   if code == keys.left or code == keys.a then
     self.cursor = self.cursor > 1 and self.cursor - 1 or COLS
-    audio.play("move")
+    audio.play("c4.move")
   elseif code == keys.right or code == keys.d then
     self.cursor = self.cursor < COLS and self.cursor + 1 or 1
-    audio.play("move")
+    audio.play("c4.move")
   elseif not held and (code == keys.space or code == keys.enter
       or code == keys.down or code == keys.s) then
     if self.twoPlayer or self.turn == HUMAN then
@@ -1338,6 +1340,7 @@ return {
   accent = colors.blue,
   order = 130,
   cover = cover,
+  music = "gambit",
   controls = {
     { "Left / Right", "Choose a column" },
     { "1 - 7", "Jump to a column" },
@@ -1457,7 +1460,7 @@ function Game:flap()
   if self.state == "play" then
     self.vy = -46
     self.wing = 0.18
-    audio.play("flap")
+    audio.play("fly.flap")
   end
 end
 
@@ -1496,8 +1499,8 @@ function Game:die()
   if self.state == "dead" then return end
   self.state = "dead"
   self.deathTimer = 1.1
-  audio.play("hit")
-  audio.play("gameover")
+  audio.play("fly.hit")
+  audio.play("fly.fall")
 end
 
 function Game:update(dt)
@@ -1533,7 +1536,7 @@ function Game:update(dt)
     if not p.passed and p.x + PIPE_W < BIRD_X then
       p.passed = true
       self.score = self.score + 1
-      audio.play("coin", min(10, self.score))
+      audio.play("fly.score", min(10, self.score))
     end
     if p.x + PIPE_W < 0 then
       local rightmost = 0
@@ -1686,6 +1689,7 @@ return {
   accent = colors.yellow,
   order = 80,
   cover = cover,
+  music = "updraft",
   scoreLabel = "PIPES",
   controls = {
     { "Space / Up", "Flap" },
@@ -1867,7 +1871,7 @@ function Game:move(dir)
   end
 
   if not changed then
-    audio.play("deny")
+    audio.play("g2048.deny")
     return false
   end
 
@@ -1879,9 +1883,10 @@ function Game:move(dir)
   self.slides = slides
   self.slideTime = SLIDE_TIME
   if gained > 0 then
-    audio.play("merge", min(8, floor(gained / 64)))
+    -- bigger merges ring higher
+    audio.play("g2048.merge", min(10, floor(gained / 32)))
   else
-    audio.play("slide")
+    audio.play("g2048.slide")
   end
   return true
 end
@@ -1907,11 +1912,11 @@ function Game:afterMove()
     self.reached2048 = true
     self.won = true
     self:say("2048! KEEP GOING")
-    audio.play("win")
+    audio.play("result.win")
   end
   if not self:hasMove() then
     self.finished = true
-    audio.play("gameover")
+    audio.play("result.lose")
   end
 end
 
@@ -1932,7 +1937,7 @@ end
 function Game:undo()
   if self.slideTime > 0 then return end
   if not self.undoGrid then
-    audio.play("deny")
+    audio.play("g2048.deny")
     return
   end
   for i = 1, N * N do self.grid[i] = self.undoGrid[i] end
@@ -1940,7 +1945,7 @@ function Game:undo()
   self.undoGrid = nil
   self.finished = false
   self.moves = math.max(0, self.moves - 1)
-  audio.play("undo")
+  audio.play("g2048.undo")
   self:say("UNDO")
 end
 
@@ -2087,6 +2092,7 @@ return {
   accent = colors.yellow,
   order = 60,
   cover = cover,
+  music = "quiet",
   controls = {
     { "Arrows / WASD", "Slide tiles" },
     { "U", "Undo one move" },
@@ -2295,7 +2301,7 @@ function Game:fire()
   local limit = self.wave >= 3 and 2 or 1
   if #self.shots >= limit then return end
   self.shots[#self.shots + 1] = { x = self.playerX + 4, y = PLAYER_Y - 1 }
-  audio.play("laser")
+  audio.play("inv.shoot")
 end
 
 -------------------------------------------------------------------- update
@@ -2347,12 +2353,14 @@ function Game:advanceFormation()
   end
   if drop then self.dir = -self.dir end
   self.frame = 3 - self.frame
-  audio.note("bass", 4 + (self.frame == 1 and 0 or 2), 0.22)
+  -- the march walks down four steps, the way the original does
+  self.marchStep = (self.marchStep or 0) % 4 + 1
+  audio.play("inv.march" .. self.marchStep)
 
   if maxY + (drop and STEP_Y or 0) >= PLAYER_Y then
     self.lives = 0
     self.finished = true
-    audio.play("explode")
+    audio.play("inv.die")
   end
 end
 
@@ -2418,14 +2426,14 @@ function Game:update(dt)
     local hit = false
     if self:shieldHit(floor(b.x), floor(b.y), true) then
       hit = true
-      audio.play("thud")
+      audio.play("inv.shield")
     elseif b.y >= PLAYER_Y and b.y <= PLAYER_Y + 5 and self.respawn <= 0 and
            b.x >= self.playerX and b.x <= self.playerX + 9 then
       hit = true
       self.lives = self.lives - 1
       self.respawn = 1.4
       self:boom(self.playerX + 4, PLAYER_Y + 2, colors.orange, 16)
-      audio.play("explode")
+      audio.play("inv.die")
       for j = #self.bombs, 1, -1 do table.remove(self.bombs, j) end
       break
     elseif b.y > FIELD_H then
@@ -2446,10 +2454,10 @@ function Game:update(dt)
       self:boom(self.ufo.x + 5, 3, colors.magenta, 14)
       self.ufo = nil
       gone = true
-      audio.play("coin")
+      audio.play("inv.ufohit")
     elseif self:shieldHit(floor(s.x), floor(s.y), true) then
       gone = true
-      audio.play("thud")
+      audio.play("inv.shield")
     else
       for k = 1, #self.aliens do
         local a = self.aliens[k]
@@ -2460,7 +2468,8 @@ function Game:update(dt)
           local kind = ALIEN_KIND[a.row]
           self.score = self.score + kind.value * (1 + floor((self.wave - 1) / 2))
           self:boom(a.x + 4, a.y + 2, kind.colour, 10)
-          audio.play("hit")
+          -- the front rows are the low, fat ones
+          audio.play("inv.hit", (ROWS - a.row) * 2)
           gone = true
           break
         end
@@ -2482,7 +2491,7 @@ function Game:update(dt)
   if self.alive <= 0 then
     self.score = self.score + 200 * self.wave
     self.wave = self.wave + 1
-    audio.play("levelup")
+    audio.play("result.newwave")
     self.shots = {}
     self.bombs = {}
     self:startWave()
@@ -2587,6 +2596,7 @@ return {
   accent = colors.lime,
   order = 40,
   cover = cover,
+  music = "descent",
   controls = {
     { "Left / Right", "Move" },
     { "Space", "Fire" },
@@ -2687,7 +2697,7 @@ function Game:press(x, y, silent)
   if not silent then
     self.moves = self.moves + 1
     self.totalMoves = self.totalMoves + 1
-    audio.play("blip", (x + y) % 8)
+    audio.play(self.board[self:index(x, y)] and "lo.on" or "lo.off")
   end
 end
 
@@ -2727,7 +2737,7 @@ function Game:activate()
     local bonus = max(0, self.par * 2 - self.moves) * 15
     self.score = self.score + 200 + self.round * 50 + bonus
     self.flash = 0.6
-    audio.play("levelup")
+    audio.play("lo.solved")
     self:deal()
   end
 end
@@ -2764,7 +2774,7 @@ function Game:update(dt)
   if self.time >= self.limit then
     self.finished = true
     self.won = self.round > 3
-    audio.play("gameover")
+    audio.play("result.lose")
   end
 end
 
@@ -2839,6 +2849,7 @@ return {
   accent = colors.yellow,
   order = 110,
   cover = cover,
+  music = "quiet",
   controls = {
     { "Arrows / WASD", "Move cursor" },
     { "Space", "Press a light" },
@@ -2992,7 +3003,7 @@ function Game:fire()
     vy = s.vy + sin(s.angle) * 78,
     life = 1.05,
   }
-  audio.play("laser")
+  audio.play("met.fire")
 end
 
 function Game:hyperspace()
@@ -3003,7 +3014,7 @@ function Game:hyperspace()
   self.ship.y = math.random(6, H - 6)
   self.ship.vx, self.ship.vy = 0, 0
   self.invuln = max(self.invuln, 0.9)
-  audio.play("powerup")
+  audio.play("met.hyper")
 end
 
 function Game:onKey(code, held)
@@ -3021,7 +3032,7 @@ function Game:hitShip()
   self.dead = true
   self.lives = self.lives - 1
   self:boom(self.ship.x, self.ship.y, 22, colors.cyan)
-  audio.play("explode")
+  audio.play("met.die")
   self.deadTimer = 1.5
 end
 
@@ -3030,7 +3041,7 @@ function Game:splitRock(index)
   self.score = self.score + SIZE_SCORE[rock.size]
   self.rocksShot = self.rocksShot + 1
   self:boom(rock.x, rock.y, 6 + rock.size * 3, colors.lightGray)
-  audio.play("hit", rock.size * 3)
+  audio.play("met.rock" .. rock.size)
   table.remove(self.rocks, index)
   if rock.size > 1 then
     for _ = 1, 2 do
@@ -3115,7 +3126,7 @@ function Game:update(dt)
           self:boom(self.ufo.x, self.ufo.y, 16, colors.magenta)
           self.ufo = nil
           hit = true
-          audio.play("coin")
+          audio.play("met.ufohit")
         end
       end
       if hit then table.remove(self.bullets, i) end
@@ -3156,7 +3167,7 @@ function Game:update(dt)
         x = u.x, y = u.y, vx = dx / d * 52, vy = dy / d * 52,
         life = 1.4, hostile = true,
       }
-      audio.play("blip")
+      audio.play("met.ufo")
     end
     if u.x < -6 or u.x > W + 6 then self.ufo = nil end
     if not self.dead and self.invuln <= 0 then
@@ -3187,7 +3198,7 @@ function Game:update(dt)
 
   if #self.rocks == 0 then
     self.score = self.score + 250 * self.wave
-    audio.play("levelup")
+    audio.play("result.newwave")
     self:nextWave()
   end
 end
@@ -3335,6 +3346,7 @@ return {
   accent = colors.lightGray,
   order = 100,
   cover = cover,
+  music = "drift",
   controls = {
     { "Left / Right", "Rotate" },
     { "Up", "Thrust" },
@@ -3510,7 +3522,7 @@ function Game:reveal(x, y)
     return
   end
   self:flood(x, y)
-  audio.play("reveal")
+  audio.play("ms.reveal")
   self:checkWin()
 end
 
@@ -3520,7 +3532,7 @@ function Game:toggleFlag(x, y)
   if not cell or cell.shown then return end
   cell.flag = not cell.flag
   self.flags = self.flags + (cell.flag and 1 or -1)
-  audio.play("flag")
+  audio.play(cell.flag and "ms.flag" or "ms.unflag")
 end
 
 function Game:chord(x, y)
@@ -3530,7 +3542,7 @@ function Game:chord(x, y)
   local flags = 0
   self:neighbours(x, y, function(other) if other.flag then flags = flags + 1 end end)
   if flags ~= cell.adj then
-    audio.play("deny")
+    audio.play("ui.deny")
     return
   end
   local blown = false
@@ -3548,7 +3560,7 @@ function Game:chord(x, y)
   if blown then
     self:lose()
   else
-    audio.play("reveal")
+    audio.play("ms.chord")
     self:checkWin()
   end
 end
@@ -3567,7 +3579,7 @@ function Game:checkWin()
     end
     local speed = max(0, 600 - floor(self.time)) * 5
     self.score = self.revealed * 10 + self.bonus + speed
-    audio.play("win")
+    audio.play("ms.clear")
   else
     self.score = self.revealed * 10
   end
@@ -3581,7 +3593,7 @@ function Game:lose()
     local cell = self.cells[i]
     if cell.mine then cell.shown = true end
   end
-  audio.play("explode")
+  audio.play("ms.boom")
 end
 
 --------------------------------------------------------------------- input
@@ -3747,6 +3759,7 @@ return {
   accent = colors.lightBlue,
   order = 50,
   cover = cover,
+  music = "quiet",
   controls = {
     { "Arrows / WASD", "Move cursor" },
     { "Space", "Reveal / chord" },
@@ -3839,6 +3852,7 @@ function Game:serve(dir)
   self.rallies = 0
   self.cpuTarget = (COURT_TOP + COURT_BOTTOM) / 2
   self:cpuAim()
+  audio.play("png.serve")
 end
 
 --------------------------------------------------------------------- input
@@ -3895,12 +3909,12 @@ function Game:point(side)
     self.rightScore = self.rightScore + 1
   end
   self.flash = 0.3
-  audio.play(side == "left" and "coin" or "deny")
+  audio.play(side == "left" and "png.point" or "png.against")
   if self.leftScore >= TARGET or self.rightScore >= TARGET then
     self.finished = true
     self.won = self.leftScore > self.rightScore
     self.score = self.leftScore * 100 + max(0, self.leftScore - self.rightScore) * 50 + self.longestRally * 10
-    audio.play(self.won and "win" or "gameover")
+    audio.play(self.won and "result.win" or "result.lose")
     return
   end
   self:serve(side == "left" and 1 or -1)
@@ -3941,12 +3955,12 @@ function Game:update(dt)
       b.y = COURT_TOP
       b.vy = abs(b.vy)
       sy = -sy
-      audio.play("bounce")
+      audio.play("png.wall")
     elseif b.y + 2 > COURT_BOTTOM then
       b.y = COURT_BOTTOM - 2
       b.vy = -abs(b.vy)
       sy = -sy
-      audio.play("bounce")
+      audio.play("png.wall")
     end
 
     if b.vx < 0 and b.x <= LEFT_X + PADDLE_W and b.x >= LEFT_X - 3 then
@@ -3987,7 +4001,8 @@ function Game:bounce(b, paddleY, dir)
   if dir > 0 then self:cpuAim() end
   self.rallies = self.rallies + 1
   if self.rallies > self.longestRally then self.longestRally = self.rallies end
-  audio.play("blip", min(10, self.rallies))
+  -- the rally climbs in pitch, so a long exchange audibly tightens
+  audio.play("png.paddle", min(10, self.rallies))
 end
 
 ---------------------------------------------------------------------- draw
@@ -4054,6 +4069,7 @@ return {
   accent = colors.cyan,
   order = 90,
   cover = cover,
+  music = "ricochet",
   controls = {
     { "W / S", "Left paddle" },
     { "Up / Down", "Left paddle" },
@@ -4147,8 +4163,7 @@ end
 function Game:flash(index, duration)
   self.litPanel = index
   self.litTimer = duration or 0.3
-  local panel = PANELS[index]
-  audio.note("harp", panel.pitch, 0.7)
+  audio.play("sim.pad" .. index)
 end
 
 --------------------------------------------------------------------- input
@@ -4162,7 +4177,7 @@ function Game:pressPanel(index)
     self.state = "wrong"
     self.wrongTimer = 0.9
     self.message = "wrong"
-    audio.play("deny")
+    audio.play("sim.wrong")
     return
   end
 
@@ -4171,7 +4186,7 @@ function Game:pressPanel(index)
     self.state = "clear"
     self.clearTimer = 0.5
     self.message = "good"
-    audio.play("coin", math.min(10, self.round))
+    audio.play("sim.round")
   end
 end
 
@@ -4232,7 +4247,7 @@ function Game:update(dt)
       if self.lives <= 0 then
         self.finished = true
         self.won = self.round > 8
-        audio.play("gameover")
+        audio.play("result.lose")
       else
         -- replay the same sequence from the top
         self.state = "wait"
@@ -4323,6 +4338,8 @@ return {
   accent = colors.lime,
   order = 120,
   cover = cover,
+  -- no soundtrack: the sequence is the point
+  music = false,
   scoreLabel = "SCORE",
   controls = {
     { "Q / W", "Top panels" },
@@ -4492,7 +4509,7 @@ end
 function Game:die()
   if self.dying > 0 then return end
   self.dying = 0.9
-  audio.play("explode")
+  audio.play("snake.die")
 end
 
 function Game:step()
@@ -4540,7 +4557,8 @@ function Game:step()
     self.score = self.score + 10 * self.level
     self.interval = math.max(0.055, 0.135 - self.apples * 0.0022)
     self.flash = 0.12
-    audio.play("eat", math.min(8, floor(self.apples / 2)))
+    -- the chirp climbs as the snake grows
+    audio.play("snake.eat", math.min(8, floor(self.apples / 2)))
     self:spawnFood()
     self.bonusIn = self.bonusIn - 1
     if self.bonusIn <= 0 and not self.bonus then
@@ -4553,7 +4571,7 @@ function Game:step()
     self.grow = self.grow + 3
     self.bonus = nil
     self.flash = 0.2
-    audio.play("coin")
+    audio.play("snake.bonus")
   end
 end
 
@@ -4710,6 +4728,7 @@ return {
   accent = colors.lime,
   order = 10,
   cover = cover,
+  music = "serpentine",
   controls = {
     { "Arrows/WASD", "Turn" },
     { "P", "Pause menu" },
@@ -5007,29 +5026,29 @@ function Game:step(dx, dy)
   if nx < 1 or nx > self.w or ny < 1 or ny > self.h then return end
   local nk = self:key(nx, ny)
   if self.walls[nk] then
-    audio.play("deny")
+    audio.play("sok.blocked")
     return
   end
 
   if self.boxes[nk] then
     local bx, by = nx + dx, ny + dy
     if bx < 1 or bx > self.w or by < 1 or by > self.h then
-      audio.play("deny")
+      audio.play("sok.blocked")
       return
     end
     local bk = self:key(bx, by)
     if self.walls[bk] or self.boxes[bk] then
-      audio.play("deny")
+      audio.play("sok.blocked")
       return
     end
     self:snapshot()
     self.boxes[nk] = nil
     self.boxes[bk] = true
     self.pushes = self.pushes + 1
-    audio.play(self.goals[bk] and "coin" or "push")
+    audio.play(self.goals[bk] and "sok.ongoal" or "sok.push")
   else
     self:snapshot()
-    audio.play("step")
+    audio.play("sok.step")
   end
 
   self.px, self.py = nx, ny
@@ -5051,26 +5070,26 @@ function Game:step(dx, dy)
     prog.level = math.min(#LEVELS, self.index + 1)
     if self.index >= #LEVELS then prog.completed = true end
     data.markDirty()
-    audio.play("win")
+    audio.play("sok.solved")
   end
 end
 
 function Game:undo()
   local prev = table.remove(self.history)
   if not prev then
-    audio.play("deny")
+    audio.play("sok.blocked")
     return
   end
   self.px, self.py = prev.px, prev.py
   self.boxes = prev.boxes
   self.moves = prev.moves
   self.pushes = prev.pushes
-  audio.play("undo")
+  audio.play("sok.undo")
 end
 
 function Game:restart()
   self:load()
-  audio.play("back")
+  audio.play("sok.reset")
 end
 
 --------------------------------------------------------------------- input
@@ -5226,6 +5245,7 @@ return {
   accent = colors.orange,
   order = 70,
   cover = cover,
+  music = "quiet",
   scoreLabel = "BEST",
   controls = {
     { "Arrows / WASD", "Walk / push" },
@@ -5468,7 +5488,7 @@ function Game:spawn(kind)
       self.py = self.py - 1
     else
       self.finished = true
-      audio.play("explode")
+      audio.play("tet.topout")
     end
   end
 end
@@ -5520,11 +5540,11 @@ function Game:rotate(dir)
         self.lockResets = self.lockResets + 1
         self.lockTimer = 0
       end
-      audio.play("blip")
+      audio.play(i > 1 and "tet.wallkick" or "tet.rotate")
       return true
     end
   end
-  audio.play("deny")
+  audio.play("tet.deny")
   return false
 end
 
@@ -5540,7 +5560,7 @@ end
 
 function Game:swapHold()
   if self.holdUsed or self.finished or self.clearRows then
-    audio.play("deny")
+    audio.play("tet.deny")
     return
   end
   local previous = self.hold
@@ -5551,7 +5571,7 @@ function Game:swapHold()
   else
     self:spawn()
   end
-  audio.play("select")
+  audio.play("tet.hold")
 end
 
 function Game:hardDrop()
@@ -5561,6 +5581,7 @@ function Game:hardDrop()
   self.py = target
   self.score = self.score + dist * 2
   self.lastMoveWasRotation = false
+  audio.play("tet.harddrop")
   self:lock()
 end
 
@@ -5666,12 +5687,16 @@ function Game:lock()
     self.clearRows = full
     self.clearTimer = 0.24
     self.lastClear = label or (n .. (n == 1 and " LINE" or " LINES"))
-    audio.play(n == 4 and "clear" or "eat", n == 4 and 0 or -4)
+    -- the clear fanfare grows with the number of rows
+    local voice = "tet.line" .. n
+    if tspin then voice = "tet.tspin" elseif n >= 4 then voice = "tet.tetris" end
+    audio.play(voice)
+    if difficult and self.backToBack then audio.play("tet.b2b") end
   else
-    audio.play("lock")
+    audio.play("tet.lock")
     if topOut then
       self.finished = true
-      audio.play("explode")
+      audio.play("tet.topout")
       return
     end
     self.holdUsed = false
@@ -5695,7 +5720,7 @@ function Game:collapse()
   local newLevel = self.startLevel + floor(self.lines / 10)
   if newLevel > self.level then
     self.level = newLevel
-    audio.play("levelup")
+    audio.play("result.levelup")
   end
   self.holdUsed = false
   self:spawn()
@@ -5735,11 +5760,11 @@ function Game:update(dt)
 
   local steps = self.dasLeft:update(input.down(keys.left, keys.a), dt)
   for _ = 1, steps do
-    if self:tryMove(-1, 0) then audio.play("move") end
+    if self:tryMove(-1, 0) then audio.play("tet.move") end
   end
   steps = self.dasRight:update(input.down(keys.right, keys.d), dt)
   for _ = 1, steps do
-    if self:tryMove(1, 0) then audio.play("move") end
+    if self:tryMove(1, 0) then audio.play("tet.move") end
   end
 
   local soft = input.down(keys.down, keys.s)
@@ -5939,6 +5964,7 @@ return {
   accent = colors.cyan,
   order = 20,
   cover = cover,
+  music = "cascade",
   controls = {
     { "Left / Right", "Move" },
     { "Down", "Soft drop" },
@@ -5968,192 +5994,253 @@ return {
 }
 ]=])
 file("gameos/lib/audio.lua", [=[
---[[ audio -- non-blocking sound effects and background music.
+--[[ audio -- the console's sound engine.
 
-  Nothing here ever sleeps: play() queues notes with timestamps and update()
-  fires the ones that are due, so a 6-note explosion costs no frame time.
+  A ComputerCraft speaker can play at most eight notes per tick, so this is
+  built as a budgeted mixer rather than a pile of playNote calls:
+
+    * effects are scheduled ahead of time and cost no frame time when they
+      fire, so a nine-note explosion is as cheap as a click;
+    * music runs a small tracker (patterns, an order list, real tempo in
+      seconds) and is the first thing dropped when the tick budget is tight,
+      so gameplay feedback is never masked by the soundtrack;
+    * three independent volumes -- master, music, effects -- scale into the
+      speaker's 0..3 range.
+
   With no speaker attached every call is a silent no-op.
 ]]
 
+local req = ...
+
 local audio = {}
 
+local floor = math.floor
+local min, max = math.min, math.max
+
+-- a speaker accepts eight notes per tick; leave one spare for a late effect
+local NOTES_PER_TICK = 8
+local RESERVED_FOR_SFX = 3
+
 audio.speaker = nil
-audio.sfxOn = true
-audio.musicOn = false
-audio.volume = 1.0
+audio.volumes = { master = 0.7, music = 0.6, sfx = 1.0 }
 
 local pending = {}
 local music = nil
 local now = 0
+local budget = NOTES_PER_TICK
 
+--------------------------------------------------------------------- notes
+-- CC pitch 0..24 spans F#3 to F#5. Instruments are voiced at different
+-- octaves, so "bass" at pitch 0 sounds far below "bell" at pitch 0.
+local NAMES = { "FS", "G", "GS", "A", "AS", "B", "C", "CS", "D", "DS", "E", "F" }
+local NOTE = {}
+do
+  local octave = 3
+  for i = 0, 24 do
+    local name = NAMES[(i % 12) + 1]
+    if name == "C" and i > 0 then octave = octave + 1 end
+    NOTE[name .. octave] = i
+  end
+end
+audio.NOTE = NOTE
+audio.badNotes = {}
+
+--- Accept a pitch as a number or a note name.
+function audio.pitch(value)
+  if type(value) == "number" then return value end
+  local p = NOTE[value]
+  if not p then
+    audio.badNotes[#audio.badNotes + 1] = tostring(value)
+    return 12
+  end
+  return p
+end
+
+local VALID_INSTRUMENTS = {
+  harp = true, basedrum = true, snare = true, hat = true, bass = true,
+  flute = true, bell = true, guitar = true, chime = true, xylophone = true,
+  iron_xylophone = true, cow_bell = true, didgeridoo = true, bit = true,
+  banjo = true, pling = true,
+}
+audio.instruments = VALID_INSTRUMENTS
+
+------------------------------------------------------------------- lifecycle
 function audio.init()
   local ok, found = pcall(peripheral.find, "speaker")
-  audio.speaker = ok and found or nil
+  audio.speaker = (ok and found) or nil
+  audio.sfx = req("lib.sfx")
+  audio.songs = req("lib.music")
   return audio.speaker ~= nil
 end
 
------------------------------------------------------------------- note names
-local N = {}
-do
-  local names = { "FS", "G", "GS", "A", "AS", "B", "C", "CS", "D", "DS", "E", "F" }
-  local octave = 3
-  local p = 0
-  for i = 1, 25 do
-    local idx = ((i - 1) % 12) + 1
-    if names[idx] == "C" and i > 1 then octave = octave + 1 end
-    N[names[idx] .. octave] = p
-    p = p + 1
-  end
+function audio.setVolume(kind, value)
+  audio.volumes[kind] = max(0, min(1, value))
 end
-audio.notes = N
+
+--- True when anything would actually be audible.
+function audio.audible(kind)
+  if not audio.speaker then return false end
+  return audio.volumes.master > 0 and audio.volumes[kind] > 0
+end
+
+---------------------------------------------------------------------- mixer
+--- Push one note at the speaker, respecting the per-tick budget.
+local function emit(instrument, pitch, volume, kind)
+  local sp = audio.speaker
+  if not sp then return false end
+  if budget <= 0 then return false end
+  -- music yields the last few notes of the tick to effects
+  if kind == "music" and budget <= RESERVED_FOR_SFX then return false end
+
+  local level = volume * audio.volumes[kind] * audio.volumes.master * 3
+  if level <= 0.02 then return false end
+  if level > 3 then level = 3 end
+
+  local p = floor(pitch + 0.5)
+  if p < 0 then p = 0 elseif p > 24 then p = 24 end
+
+  budget = budget - 1
+  pcall(sp.playNote, instrument, level, p)
+  return true
+end
+audio.emit = emit
 
 --------------------------------------------------------------------- effects
--- Each entry is a list of { delay, instrument, pitch, volume }.
-audio.sfx = {
-  move        = { { 0.00, "hat", 12, 0.25 } },
-  select      = { { 0.00, "pling", 14, 0.45 }, { 0.05, "pling", 18, 0.45 } },
-  back        = { { 0.00, "pling", 13, 0.40 }, { 0.05, "pling", 8, 0.35 } },
-  deny        = { { 0.00, "bass", 4, 0.5 }, { 0.08, "bass", 2, 0.5 } },
-  start       = { { 0.00, "bell", 12, 0.5 }, { 0.07, "bell", 16, 0.5 }, { 0.14, "bell", 19, 0.6 } },
-  eat         = { { 0.00, "bell", 17, 0.5 }, { 0.05, "bell", 21, 0.5 } },
-  coin        = { { 0.00, "chime", 19, 0.5 }, { 0.06, "chime", 23, 0.5 } },
-  blip        = { { 0.00, "bit", 16, 0.35 } },
-  laser       = { { 0.00, "bit", 21, 0.35 }, { 0.04, "bit", 15, 0.3 }, { 0.08, "bit", 10, 0.25 } },
-  hit         = { { 0.00, "basedrum", 6, 0.7 } },
-  bounce      = { { 0.00, "bit", 14, 0.4 } },
-  thud        = { { 0.00, "bass", 6, 0.6 } },
-  lock        = { { 0.00, "bass", 9, 0.45 } },
-  explode     = { { 0.00, "basedrum", 2, 1.0 }, { 0.06, "snare", 7, 0.8 }, { 0.13, "snare", 4, 0.6 }, { 0.22, "snare", 1, 0.4 } },
-  clear       = { { 0.00, "xylophone", 12, 0.5 }, { 0.05, "xylophone", 16, 0.5 }, { 0.10, "xylophone", 19, 0.55 }, { 0.15, "xylophone", 24, 0.6 } },
-  levelup     = { { 0.00, "bell", 12, 0.6 }, { 0.09, "bell", 16, 0.6 }, { 0.18, "bell", 19, 0.6 }, { 0.27, "bell", 24, 0.7 } },
-  powerup     = { { 0.00, "iron_xylophone", 12, 0.5 }, { 0.05, "iron_xylophone", 17, 0.5 }, { 0.10, "iron_xylophone", 22, 0.55 } },
-  gameover    = { { 0.00, "harp", 14, 0.6 }, { 0.16, "harp", 11, 0.6 }, { 0.32, "harp", 7, 0.6 }, { 0.48, "bass", 3, 0.7 } },
-  win         = { { 0.00, "bell", 12, 0.6 }, { 0.10, "bell", 16, 0.6 }, { 0.20, "bell", 19, 0.6 }, { 0.30, "bell", 24, 0.7 }, { 0.45, "bell", 19, 0.5 }, { 0.55, "bell", 24, 0.8 } },
-  boot        = { { 0.00, "bit", 7, 0.5 }, { 0.09, "bit", 12, 0.5 }, { 0.18, "bit", 16, 0.5 }, { 0.27, "bit", 19, 0.6 }, { 0.40, "bit", 24, 0.7 } },
-  flap        = { { 0.00, "hat", 18, 0.3 } },
-  step        = { { 0.00, "hat", 8, 0.25 } },
-  push        = { { 0.00, "bass", 10, 0.35 } },
-  reveal      = { { 0.00, "hat", 15, 0.2 } },
-  flag        = { { 0.00, "cow_bell", 14, 0.35 } },
-  merge       = { { 0.00, "xylophone", 14, 0.4 }, { 0.05, "xylophone", 19, 0.4 } },
-  slide       = { { 0.00, "hat", 10, 0.22 } },
-  undo        = { { 0.00, "didgeridoo", 8, 0.35 } },
-}
+--- Play a named effect. `opts` may be a semitone shift, or a table with
+--- `shift` and `vol` (a multiplier on the effect's own levels).
+function audio.play(name, opts)
+  if not audio.audible("sfx") then return end
+  local def = audio.sfx and audio.sfx.get(name)
+  if not def then return end
+
+  local shift, scale = 0, 1
+  if type(opts) == "number" then
+    shift = opts
+  elseif type(opts) == "table" then
+    shift = opts.shift or 0
+    scale = opts.vol or 1
+  end
+
+  if #pending > 96 then return end
+  for i = 1, #def do
+    local event = def[i]
+    if event[1] <= 0 then
+      emit(event[2], event[3] + shift, event[4] * scale, "sfx")
+    else
+      pending[#pending + 1] = {
+        t = now + event[1],
+        inst = event[2],
+        pitch = event[3] + shift,
+        vol = event[4] * scale,
+      }
+    end
+  end
+end
+
+--- One note, right now. Used where a game owns the pitch (Simon's panels).
+function audio.note(instrument, pitch, volume)
+  if not audio.audible("sfx") then return end
+  emit(instrument, audio.pitch(pitch), volume or 0.5, "sfx")
+end
+
+function audio.stopEffects()
+  for i = #pending, 1, -1 do pending[i] = nil end
+end
 
 ----------------------------------------------------------------------- music
-audio.badNotes = {}
-local function seq(str)
-  local out = {}
-  for tok in str:gmatch("%S+") do
-    if tok == "." then
-      out[#out + 1] = false
-    else
-      local p = N[tok]
-      if not p then audio.badNotes[#audio.badNotes + 1] = tok end
-      out[#out + 1] = p or false
-    end
-  end
-  return out
-end
-
-audio.tracks = {
-  menu = {
-    tempo = 0.155,
-    lead = seq([[A3 C4 E4 A4 E4 C4 A3 .
-                 F4 A4 C5 A4 F4 C4 A3 .
-                 C4 E4 G4 C5 G4 E4 C4 .
-                 G3 B3 D4 G4 D4 B3 G3 .]]),
-    bass = seq([[A3 . . . E4 . . .
-                 F4 . . . C4 . . .
-                 C4 . . . G4 . . .
-                 G3 . . . D4 . . .]]),
-    leadInst = "pling",
-    bassInst = "bass",
-  },
-}
-
-------------------------------------------------------------------------- api
-local function emit(inst, pitch, vol)
-  local sp = audio.speaker
-  if not sp then return end
-  local v = vol * audio.volume
-  if v <= 0 then return end
-  if v > 3 then v = 3 end
-  local p = math.floor(pitch + 0.5)
-  if p < 0 then p = 0 elseif p > 24 then p = 24 end
-  pcall(sp.playNote, inst, v, p)
-end
-
---- Queue a named effect. `shift` transposes it in semitones.
-function audio.play(name, shift)
-  if not audio.sfxOn or not audio.speaker then return end
-  local def = audio.sfx[name]
-  if not def then return end
-  shift = shift or 0
-  if #pending > 64 then return end
-  for i = 1, #def do
-    local n = def[i]
-    if n[1] <= 0 then
-      emit(n[2], n[3] + shift, n[4])
-    else
-      pending[#pending + 1] = { t = now + n[1], inst = n[2], pitch = n[3] + shift, vol = n[4] }
-    end
-  end
-end
-
---- Play a single note immediately.
-function audio.note(inst, pitch, vol)
-  if not audio.sfxOn then return end
-  emit(inst, pitch, vol or 0.5)
-end
-
+--- Start a song by name. Restarting the song that is already playing is a
+--- no-op, so screens can call this freely.
 function audio.playMusic(name)
-  if not audio.musicOn or not audio.speaker then music = nil return end
-  local track = audio.tracks[name]
-  if not track then music = nil return end
-  music = { track = track, step = 0, nextT = now }
+  if not name then return audio.stopMusic() end
+  if music and music.name == name then return end
+  local song = audio.songs and audio.songs.get(name)
+  if not song then
+    music = nil
+    return
+  end
+  music = {
+    name = name,
+    song = song,
+    orderIndex = 1,
+    row = 0,
+    acc = 0,
+    rowTime = song.tempo * 0.05,
+  }
 end
 
 function audio.stopMusic()
   music = nil
 end
 
-function audio.stopAll()
-  for i = #pending, 1, -1 do pending[i] = nil end
-  music = nil
+function audio.musicName()
+  return music and music.name or nil
 end
 
+function audio.stopAll()
+  audio.stopEffects()
+  audio.stopMusic()
+end
+
+--- Play one row of the current pattern.
+local function playRow()
+  local song = music.song
+  local patternName = song.order[music.orderIndex]
+  local pattern = song.patterns[patternName]
+  if not pattern then return end
+
+  for i = 1, #pattern do
+    local track = pattern[i]
+    local note = track.rows[music.row]
+    if note then
+      emit(track.inst, note.pitch, note.vol * track.vol, "music")
+    end
+  end
+
+  music.row = music.row + 1
+  if music.row > song.rows then
+    music.row = 1
+    music.orderIndex = music.orderIndex + 1
+    if music.orderIndex > #song.order then
+      music.orderIndex = song.loop or 1
+    end
+  end
+end
+
+--------------------------------------------------------------------- update
 --- Called once per frame with the current clock reading.
 function audio.update(clock)
+  local dt = clock - now
+  if dt < 0 or dt > 1 then dt = 0.05 end
   now = clock
+  budget = NOTES_PER_TICK
+
   if not audio.speaker then
-    if #pending > 0 then for i = #pending, 1, -1 do pending[i] = nil end end
+    if #pending > 0 then audio.stopEffects() end
     return
   end
+
+  -- effects first: they are feedback, music is decoration
   local i = 1
   while i <= #pending do
-    local n = pending[i]
-    if n.t <= now then
-      emit(n.inst, n.pitch, n.vol)
+    local event = pending[i]
+    if event.t <= now then
+      emit(event.inst, event.pitch, event.vol, "sfx")
       table.remove(pending, i)
     else
       i = i + 1
     end
   end
-  if music and audio.musicOn then
-    local track = music.track
+
+  if music and audio.audible("music") then
+    if music.row == 0 then music.row = 1 end
+    music.acc = music.acc + dt
     local guard = 0
-    while now >= music.nextT and guard < 4 do
+    while music.acc >= music.rowTime and guard < 4 do
+      music.acc = music.acc - music.rowTime
       guard = guard + 1
-      music.step = music.step + 1
-      if music.step > #track.lead then music.step = 1 end
-      local l = track.lead[music.step]
-      local b = track.bass[music.step]
-      if l then emit(track.leadInst, l, 0.30) end
-      if b then emit(track.bassInst, b, 0.35) end
-      music.nextT = music.nextT + track.tempo
+      playRow()
     end
-    if music.nextT < now - 1 then music.nextT = now + track.tempo end
+    if music.acc > music.rowTime * 4 then music.acc = 0 end
   end
 end
 
@@ -6444,9 +6531,10 @@ local MAX_SCORES = 5
 
 local DEFAULT_SETTINGS = {
   theme = "midnight",
-  sfx = true,
-  music = false,
-  volume = 1,
+  -- three independent knobs, 0..10
+  volMaster = 7,
+  volMusic = 6,
+  volSfx = 10,
   showFps = false,
   confirmExit = true,
 }
@@ -7365,6 +7453,380 @@ end
 
 return input
 ]=])
+file("gameos/lib/music.lua", [=[
+--[[ music -- the console's soundtrack.
+
+  Songs are written the way a tracker writes them: sixteen-row patterns, a few
+  tracks each, and an order list that strings the patterns together. A row is
+  `tempo` ticks long, so tempo 3 is 0.15s per row and a pattern is one bar of
+  2.4 seconds.
+
+  Note tokens:
+    D4     play D above middle
+    D4!    accented (louder)
+    D4~    soft
+    5      a raw pitch, used for drums where pitch is timbre
+    .      rest
+
+  Everything is written inside the speaker's two octaves, F#3 to F#5.
+  Instruments are voiced at different octaves, so "bass" at D4 sounds far
+  below "bell" at D4 -- that is what gives these any vertical range at all.
+
+  All of this is original; nothing here is a transcription.
+]]
+
+local req = ...
+local audio = req("lib.audio")
+
+local music = {}
+
+local ROWS = 16
+local ACCENT, SOFT = 1.35, 0.6
+
+music.badTokens = {}
+
+--- Turn a row string into a sparse map of row -> { pitch, vol }.
+local function parse(text, label)
+  local rows = {}
+  local count = 0
+  for token in text:gmatch("%S+") do
+    count = count + 1
+    if token ~= "." then
+      local body = token
+      local vol = 1
+      local tail = body:sub(-1)
+      if tail == "!" then
+        vol = ACCENT
+        body = body:sub(1, -2)
+      elseif tail == "~" then
+        vol = SOFT
+        body = body:sub(1, -2)
+      end
+      local pitch
+      if body:match("^%d+$") then
+        pitch = tonumber(body)
+      else
+        pitch = audio.NOTE[body]
+      end
+      if not pitch or pitch < 0 or pitch > 24 then
+        music.badTokens[#music.badTokens + 1] = (label or "?") .. ":" .. token
+      else
+        rows[count] = { pitch = pitch, vol = vol }
+      end
+    end
+  end
+  if count ~= ROWS then
+    music.badTokens[#music.badTokens + 1] =
+      (label or "?") .. " has " .. count .. " rows, expected " .. ROWS
+  end
+  return rows
+end
+
+--- Build one pattern from { instrument, volume, rows } triples.
+local function pattern(label, tracks)
+  local out = {}
+  for i = 1, #tracks do
+    local track = tracks[i]
+    if not audio.instruments[track[1]] then
+      music.badTokens[#music.badTokens + 1] = label .. " bad instrument " .. tostring(track[1])
+    end
+    out[i] = { inst = track[1], vol = track[2], rows = parse(track[3], label) }
+  end
+  return out
+end
+
+local SONGS = {}
+
+local function song(id, def)
+  def.id = id
+  def.rows = ROWS
+  local built = {}
+  for name, tracks in pairs(def.patterns) do
+    built[name] = pattern(id .. "/" .. name, tracks)
+  end
+  def.patterns = built
+  SONGS[id] = def
+end
+
+--============================================================== the launcher
+-- Warm, unhurried, and happy to loop for a long time behind a menu.
+song("standby", {
+  title = "Standby",
+  tempo = 3,
+  loop = 1,
+  order = { "am", "am", "f", "f", "c", "c", "g", "g" },
+  patterns = {
+    am = {
+      { "pling", 0.42, "A3 .  C4 .  E4 .  A4 .  C5 .  A4 .  E4 .  C4 ." },
+      { "bass",  0.50, "A3 .  .  .  .  .  .  .  E4 .  .  .  .  .  .  ." },
+      { "hat",   0.16, "18 .  .  .  18 .  .  .  18 .  .  .  18 .  .  ." },
+    },
+    f = {
+      { "pling", 0.42, "F4 .  A4 .  C5 .  F4 .  A4 .  C5 .  A4 .  F4 ." },
+      { "bass",  0.50, "F4 .  .  .  .  .  .  .  C4 .  .  .  .  .  .  ." },
+      { "hat",   0.16, "18 .  .  .  18 .  .  .  18 .  .  .  18 .  .  ." },
+    },
+    c = {
+      { "pling", 0.42, "C4 .  E4 .  G4 .  C5 .  E5 .  C5 .  G4 .  E4 ." },
+      { "bass",  0.50, "C4 .  .  .  .  .  .  .  G4 .  .  .  .  .  .  ." },
+      { "hat",   0.16, "18 .  .  .  18 .  .  .  18 .  .  .  18 .  .  ." },
+    },
+    g = {
+      { "pling", 0.42, "G3 .  B3 .  D4 .  G4 .  B4 .  G4 .  D4 .  B3 ." },
+      { "bass",  0.50, "G3 .  .  .  .  .  .  .  D4 .  .  .  .  .  .  ." },
+      { "hat",   0.16, "18 .  .  .  18 .  .  .  18 .  .  .  18 .  .  ." },
+    },
+  },
+})
+
+--============================================================== Tetris
+-- Fast, minor, and relentless: a pumping bass under a falling melody.
+song("cascade", {
+  title = "Cascade",
+  tempo = 2,
+  loop = 1,
+  order = { "a", "a", "b", "a", "c", "c", "d", "a" },
+  patterns = {
+    a = {
+      { "pling", 0.40, "D5! .  A4 .  F4 .  A4 .  D5 .  A4 .  C5 .  A4 ." },
+      { "bass",  0.55, "D4 .  .  .  D4 .  .  .  D4 .  .  .  D4 .  .  ." },
+      { "basedrum", 0.45, "2 .  .  .  .  .  .  .  2 .  .  .  .  .  .  ." },
+      { "snare", 0.30, ".  .  .  .  5 .  .  .  .  .  .  .  5 .  .  ." },
+    },
+    b = {
+      { "pling", 0.40, "C5! .  G4 .  E4 .  G4 .  C5 .  G4 .  AS4 . G4 ." },
+      { "bass",  0.55, "C4 .  .  .  C4 .  .  .  C4 .  .  .  C4 .  .  ." },
+      { "basedrum", 0.45, "2 .  .  .  .  .  .  .  2 .  .  .  .  .  .  ." },
+      { "snare", 0.30, ".  .  .  .  5 .  .  .  .  .  .  .  5 .  .  ." },
+    },
+    c = {
+      { "pling", 0.40, "AS4! . F4 .  D4 .  F4 .  AS4 . F4 .  A4 .  F4 ." },
+      { "bass",  0.55, "AS3 . .  .  AS3 . .  .  AS3 . .  .  AS3 . .  ." },
+      { "basedrum", 0.45, "2 .  .  .  .  .  .  .  2 .  .  .  .  .  .  ." },
+      { "snare", 0.30, ".  .  .  .  5 .  .  .  .  .  .  .  5 .  .  ." },
+    },
+    d = {
+      { "pling", 0.40, "A4! .  E4 .  CS4 . E4 .  A4 .  CS5 . E5 .  CS5 ." },
+      { "bass",  0.55, "A3 .  .  .  A3 .  .  .  A3 .  .  .  E4 .  .  ." },
+      { "basedrum", 0.45, "2 .  .  .  .  .  .  .  2 .  .  .  2 .  .  ." },
+      { "snare", 0.30, ".  .  .  .  5 .  .  .  .  .  .  .  5 .  .  ." },
+    },
+  },
+})
+
+--============================================================== Snake
+-- Light and springy; a banjo line that hops the way the snake does.
+song("serpentine", {
+  title = "Serpentine",
+  tempo = 3,
+  loop = 1,
+  order = { "a", "b", "a", "c" },
+  patterns = {
+    a = {
+      { "banjo", 0.40, "D4 .  FS4 . A4 .  FS4 . D5 .  A4 .  FS4 . A4 ." },
+      { "bass",  0.45, "D4 .  .  .  A3 .  .  .  D4 .  .  .  A3 .  .  ." },
+      { "hat",   0.14, ".  .  16 . .  .  16 . .  .  16 . .  .  16 ." },
+    },
+    b = {
+      { "banjo", 0.40, "G4 .  B4 .  D5 .  B4 .  G4 .  D5 .  B4 .  G4 ." },
+      { "bass",  0.45, "G3 .  .  .  D4 .  .  .  G3 .  .  .  D4 .  .  ." },
+      { "hat",   0.14, ".  .  16 . .  .  16 . .  .  16 . .  .  16 ." },
+    },
+    c = {
+      { "banjo", 0.40, "A4 .  CS5 . E5 .  CS5 . A4 .  E4 .  CS4 . E4 ." },
+      { "bass",  0.45, "A3 .  .  .  E4 .  .  .  A3 .  .  .  E4 .  .  ." },
+      { "hat",   0.14, ".  .  16 . .  .  16 . .  .  16 . .  .  16 ." },
+    },
+  },
+})
+
+--============================================================== Breakout, Pong
+-- Punchy and syncopated, so it sits behind fast paddle work.
+song("ricochet", {
+  title = "Ricochet",
+  tempo = 3,
+  loop = 1,
+  order = { "a", "b", "a", "c" },
+  patterns = {
+    a = {
+      { "bit",   0.34, "D4 .  .  D4 .  F4 .  .  A4 .  .  A4 .  G4 .  ." },
+      { "bass",  0.50, "D4 .  .  .  .  .  .  .  A3 .  .  .  .  .  .  ." },
+      { "hat",   0.15, "16 .  16 . 16 .  16 . 16 .  16 . 16 .  16 ." },
+    },
+    b = {
+      { "bit",   0.34, "C4 .  .  C4 .  E4 .  .  G4 .  .  G4 .  F4 .  ." },
+      { "bass",  0.50, "C4 .  .  .  .  .  .  .  G3 .  .  .  .  .  .  ." },
+      { "hat",   0.15, "16 .  16 . 16 .  16 . 16 .  16 . 16 .  16 ." },
+    },
+    c = {
+      { "bit",   0.34, "AS3 . .  AS3 . D4 .  .  F4 .  .  A4 .  F4 .  ." },
+      { "bass",  0.50, "AS3 . .  .  .  .  .  .  F4 .  .  .  .  .  .  ." },
+      { "hat",   0.15, "16 .  16 . 16 .  16 . 16 .  16 . 16 .  16 ." },
+    },
+  },
+})
+
+--============================================================== Invaders
+-- A slow, heavy descent. The formation is already a metronome, so this
+-- stays out of the way and just adds dread.
+song("descent", {
+  title = "Descent",
+  tempo = 4,
+  loop = 1,
+  order = { "a", "b", "c", "d" },
+  patterns = {
+    a = {
+      { "bass",       0.55, "D4 .  .  .  C4 .  .  .  AS3 . .  .  A3 .  .  ." },
+      { "didgeridoo", 0.28, "D4 .  .  .  .  .  .  .  .  .  .  .  .  .  .  ." },
+      { "snare",      0.22, ".  .  .  .  .  .  .  4 .  .  .  .  .  .  .  4" },
+    },
+    b = {
+      { "bass",       0.55, "G3 .  .  .  A3 .  .  .  AS3 . .  .  C4 .  .  ." },
+      { "didgeridoo", 0.28, "G3 .  .  .  .  .  .  .  .  .  .  .  .  .  .  ." },
+      { "snare",      0.22, ".  .  .  .  .  .  .  4 .  .  .  .  .  .  .  4" },
+    },
+    c = {
+      { "bass",       0.55, "D4 .  .  .  D4 .  .  .  C4 .  .  .  AS3 . .  ." },
+      { "flute",      0.24, ".  .  .  .  D5~ . .  .  .  .  .  .  C5~ . .  ." },
+      { "snare",      0.22, ".  .  .  .  .  .  .  4 .  .  .  .  .  .  .  4" },
+    },
+    d = {
+      { "bass",       0.55, "A3 .  .  .  A3 .  .  .  G3 .  .  .  FS3 . .  ." },
+      { "flute",      0.24, ".  .  .  .  A4~ . .  .  .  .  .  .  G4~ . .  ." },
+      { "snare",      0.22, ".  .  .  .  .  .  .  4 .  .  .  .  .  .  .  4" },
+    },
+  },
+})
+
+--============================================================== Meteors
+-- Sparse and weightless. Long gaps are the point.
+song("drift", {
+  title = "Drift",
+  tempo = 5,
+  loop = 1,
+  order = { "a", "b", "a", "c" },
+  patterns = {
+    a = {
+      { "flute",      0.30, "D4 .  .  .  A4 .  .  .  .  .  F4 .  .  .  .  ." },
+      { "didgeridoo", 0.26, "D4 .  .  .  .  .  .  .  .  .  .  .  .  .  .  ." },
+      { "chime",      0.18, ".  .  .  .  .  .  .  .  D5~ . .  .  .  .  .  ." },
+    },
+    b = {
+      { "flute",      0.30, "C4 .  .  .  G4 .  .  .  .  .  E4 .  .  .  .  ." },
+      { "didgeridoo", 0.26, "C4 .  .  .  .  .  .  .  .  .  .  .  .  .  .  ." },
+      { "chime",      0.18, ".  .  .  .  .  .  .  .  E5~ . .  .  .  .  .  ." },
+    },
+    c = {
+      { "flute",      0.30, "AS3 . .  .  F4 .  .  .  .  .  D4 .  .  .  .  ." },
+      { "didgeridoo", 0.26, "AS3 . .  .  .  .  .  .  .  .  .  .  .  .  .  ." },
+      { "chime",      0.18, ".  .  .  .  .  .  .  .  F5~ . .  .  .  .  .  ." },
+    },
+  },
+})
+
+--============================================================== the puzzles
+-- Slow, soft and deliberately unmemorable: this has to survive being left
+-- on while somebody stares at a board for ten minutes.
+song("quiet", {
+  title = "Quiet Hours",
+  tempo = 6,
+  loop = 1,
+  order = { "a", "b", "c", "b" },
+  patterns = {
+    a = {
+      { "harp", 0.26, "D4 .  .  .  A4 .  .  .  F4 .  .  .  A4 .  .  ." },
+      { "bass", 0.30, "D4 .  .  .  .  .  .  .  .  .  .  .  .  .  .  ." },
+    },
+    b = {
+      { "harp", 0.26, "C4 .  .  .  G4 .  .  .  E4 .  .  .  G4 .  .  ." },
+      { "bass", 0.30, "C4 .  .  .  .  .  .  .  .  .  .  .  .  .  .  ." },
+    },
+    c = {
+      { "harp", 0.26, "AS3 . .  .  F4 .  .  .  D4 .  .  .  F4 .  .  ." },
+      { "bass", 0.30, "AS3 . .  .  .  .  .  .  .  .  .  .  .  .  .  ." },
+    },
+  },
+})
+
+--============================================================== Flappy
+-- Quick, airy and a little silly.
+song("updraft", {
+  title = "Updraft",
+  tempo = 3,
+  loop = 1,
+  order = { "a", "b", "a", "c" },
+  patterns = {
+    a = {
+      { "flute", 0.32, "D5 .  A4 .  D5 .  FS5 . E5 .  CS5 . A4 .  .  ." },
+      { "bass",  0.42, "D4 .  .  .  A3 .  .  .  D4 .  .  .  A3 .  .  ." },
+      { "hat",   0.13, "16 .  .  16 .  .  16 . .  16 .  .  16 .  .  ." },
+    },
+    b = {
+      { "flute", 0.32, "G4 .  D5 .  E5 .  D5 .  B4 .  G4 .  D4 .  .  ." },
+      { "bass",  0.42, "G3 .  .  .  D4 .  .  .  G3 .  .  .  D4 .  .  ." },
+      { "hat",   0.13, "16 .  .  16 .  .  16 . .  16 .  .  16 .  .  ." },
+    },
+    c = {
+      { "flute", 0.32, "A4 .  E5 .  FS5 . E5 .  CS5 . A4 .  E4 .  .  ." },
+      { "bass",  0.42, "A3 .  .  .  E4 .  .  .  A3 .  .  .  E4 .  .  ." },
+      { "hat",   0.13, "16 .  .  16 .  .  16 . .  16 .  .  16 .  .  ." },
+    },
+  },
+})
+
+--============================================================== Connect Four
+-- Measured and a bit smug, for a game where you sit and think.
+song("gambit", {
+  title = "Gambit",
+  tempo = 4,
+  loop = 1,
+  order = { "a", "b", "a", "c" },
+  patterns = {
+    a = {
+      { "guitar", 0.34, "D4 .  .  F4 .  .  A4 .  .  .  G4 .  F4 .  .  ." },
+      { "bass",   0.45, "D4 .  .  .  .  .  .  .  A3 .  .  .  .  .  .  ." },
+      { "hat",    0.12, ".  .  .  .  16 . .  .  .  .  .  .  16 .  .  ." },
+    },
+    b = {
+      { "guitar", 0.34, "C4 .  .  E4 .  .  G4 .  .  .  F4 .  E4 .  .  ." },
+      { "bass",   0.45, "C4 .  .  .  .  .  .  .  G3 .  .  .  .  .  .  ." },
+      { "hat",    0.12, ".  .  .  .  16 . .  .  .  .  .  .  16 .  .  ." },
+    },
+    c = {
+      { "guitar", 0.34, "AS3 . .  D4 .  .  F4 .  .  .  E4 .  D4 .  .  ." },
+      { "bass",   0.45, "AS3 . .  .  .  .  .  .  F4 .  .  .  .  .  .  ." },
+      { "hat",    0.12, ".  .  .  .  16 . .  .  .  .  .  .  16 .  .  ." },
+    },
+  },
+})
+
+-------------------------------------------------------------------- lookup
+function music.get(id) return SONGS[id] end
+
+function music.names()
+  local out = {}
+  for id in pairs(SONGS) do out[#out + 1] = id end
+  table.sort(out)
+  return out
+end
+
+function music.title(id)
+  local s = SONGS[id]
+  return s and s.title or id
+end
+
+--- Seconds for one pass through the order list.
+function music.length(id)
+  local s = SONGS[id]
+  if not s then return 0 end
+  return #s.order * ROWS * s.tempo * 0.05
+end
+
+music.songs = SONGS
+music.ROWS = ROWS
+
+return music
+]=])
 file("gameos/lib/runtime.lua", [=[
 --[[ runtime -- plays one game module.
 
@@ -7407,20 +7869,20 @@ local function crash(def, err)
     lines[#lines + 1] = msg:sub(1, width)
     msg = msg:sub(width + 1)
   end
-  audio.play("deny")
+  audio.play("ui.deny")
   ui.alert(" " .. def.name .. " crashed ", lines, colors.red)
   return "menu"
 end
 
 --------------------------------------------------------------- pause screen
 local function pauseMenu(def, api)
-  audio.play("back")
+  audio.play("ui.back")
   while true do
     local items = {
       { label = "Resume" },
       { label = "Restart" },
       { label = "Controls" },
-      { label = "Sound", hint = audio.sfxOn and "on" or "off" },
+      { label = "Volume", hint = math.floor(audio.volumes.master * 10) .. "/10" },
       { label = "Quit to menu" },
     }
     local pick = ui.picker({
@@ -7435,9 +7897,12 @@ local function pauseMenu(def, api)
     if pick == 3 then
       ui.controls(def)
     elseif pick == 4 then
-      audio.sfxOn = not audio.sfxOn
-      data.set("sfx", audio.sfxOn)
-      audio.play("select")
+      -- step the master knob down and wrap, so it is adjustable mid-game
+      local step = math.floor(audio.volumes.master * 10 + 0.5) - 2
+      if step < 0 then step = 10 end
+      audio.volumes.master = step / 10
+      data.set("volMaster", step)
+      audio.play("ui.select")
     elseif pick == 5 then
       return "quit"
     end
@@ -7580,18 +8045,18 @@ local function gameOverCard(def, inst, rank, best, trophies)
       local k = ev[2]
       if k == keys.left or k == keys.a then
         sel = sel > 1 and sel - 1 or #buttons
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.right or k == keys.d or k == keys.tab then
         sel = sel < #buttons and sel + 1 or 1
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
-        audio.play("select")
+        audio.play("ui.select")
         return sel
       elseif k == keys.r then
-        audio.play("select")
+        audio.play("ui.select")
         return 1
       elseif k == keys.backspace or k == keys.q then
-        audio.play("back")
+        audio.play("ui.back")
         return 2
       end
     elseif name == "mouse_click" then
@@ -7599,7 +8064,7 @@ local function gameOverCard(def, inst, rank, best, trophies)
       for i = 1, #rects do
         local r = rects[i]
         if my == r.y and mx >= r.x and mx < r.x + r.w then
-          audio.play("select")
+          audio.play("ui.select")
           return i
         end
       end
@@ -7639,8 +8104,9 @@ local function session(def, api, mode)
   end
 
   input.reset()
-  audio.stopMusic()
-  audio.play("start")
+  -- Simon asks you to listen, so it is the one game that runs in silence
+  if def.music then audio.playMusic(def.music) else audio.stopMusic() end
+  audio.play("ui.launch")
 
   local startClock = os.clock()
   local last = startClock
@@ -7760,8 +8226,8 @@ local function session(def, api, mode)
   end
   local best = data.best(def.id)
 
-  audio.play(inst.won and "win" or "gameover")
-  if #trophies > 0 then audio.play("powerup") end
+  audio.play(inst.won and "result.win" or "result.lose")
+  if #trophies > 0 then audio.play("ui.trophy") end
 
   -- a new number one earns the arcade name entry
   if rank == 1 and (inst.score or 0) > 0 then
@@ -7832,6 +8298,348 @@ function runtime.play(def, api)
 end
 
 return runtime
+]=])
+file("gameos/lib/sfx.lua", [=[
+--[[ sfx -- every sound the console makes.
+
+  An effect is a list of { delay, instrument, pitch, volume } events. Delays
+  are in seconds from the moment the effect is triggered; the engine schedules
+  them, so a long sound costs nothing extra at the point it is played.
+
+  The shapes below are the vocabulary everything is built from:
+
+    blip    one note
+    rise    pitch climbing, gaining volume     -- something good happened
+    fall    pitch dropping, losing volume      -- something was lost
+    stab    several instruments on one beat    -- impact
+    chord   notes struck together, lightly spread
+    roll    a note repeating and fading        -- decay tail
+    thump   drum layered under a pitched note  -- weight
+]]
+
+local req = ...
+local audio = req("lib.audio")
+
+local sfx = {}
+local M = {}
+
+local P = audio.pitch
+local floor = math.floor
+
+------------------------------------------------------------------- shapes
+local function blip(inst, pitch, vol, at)
+  return { { at or 0, inst, P(pitch), vol } }
+end
+
+local function rise(inst, from, to, count, step, vol, gain)
+  local out = {}
+  local a, b = P(from), P(to)
+  for i = 0, count - 1 do
+    local k = count > 1 and i / (count - 1) or 0
+    out[#out + 1] = { i * step, inst, a + (b - a) * k, vol * (1 + (gain or 0.3) * k) }
+  end
+  return out
+end
+
+local function fall(inst, from, to, count, step, vol)
+  local out = {}
+  local a, b = P(from), P(to)
+  for i = 0, count - 1 do
+    local k = count > 1 and i / (count - 1) or 0
+    out[#out + 1] = { i * step, inst, a + (b - a) * k, vol * (1 - 0.55 * k) }
+  end
+  return out
+end
+
+local function roll(inst, pitch, count, step, vol, falloff)
+  local out = {}
+  local p = P(pitch)
+  for i = 0, count - 1 do
+    out[#out + 1] = { i * step, inst, p, vol * ((falloff or 0.6) ^ i) }
+  end
+  return out
+end
+
+local function chord(inst, pitches, vol, spread)
+  local out = {}
+  for i = 1, #pitches do
+    out[#out + 1] = { (i - 1) * (spread or 0.02), inst, P(pitches[i]), vol }
+  end
+  return out
+end
+
+--- Merge several shapes, optionally offsetting the later ones in time.
+local function mix(...)
+  local out = {}
+  for i = 1, select("#", ...) do
+    local part = select(i, ...)
+    for j = 1, #part do
+      out[#out + 1] = part[j]
+    end
+  end
+  return out
+end
+
+local function shift(part, seconds)
+  local out = {}
+  for i = 1, #part do
+    local e = part[i]
+    out[i] = { e[1] + seconds, e[2], e[3], e[4] }
+  end
+  return out
+end
+
+local function stab(pitch, vol)
+  return {
+    { 0, "basedrum", P(pitch), vol },
+    { 0, "bit", P(pitch) + 12, vol * 0.55 },
+  }
+end
+
+local function thump(inst, pitch, vol)
+  return {
+    { 0, "basedrum", 2, vol * 0.9 },
+    { 0, inst, P(pitch), vol },
+  }
+end
+
+sfx.blip, sfx.rise, sfx.fall, sfx.roll = blip, rise, fall, roll
+sfx.chord, sfx.mix, sfx.shift, sfx.stab, sfx.thump = chord, mix, shift, stab, thump
+
+--============================================================== the console
+-- Navigation is deliberately quiet and dry: it happens constantly.
+M["ui.move"]     = blip("hat", "D5", 0.20)
+M["ui.select"]   = { { 0, "pling", P("D4"), 0.42 }, { 0.05, "pling", P("A4"), 0.46 } }
+M["ui.back"]     = { { 0, "pling", P("A4"), 0.36 }, { 0.05, "pling", P("D4"), 0.32 } }
+M["ui.deny"]     = { { 0, "bass", P("AS3"), 0.5 }, { 0.07, "bass", P("G3"), 0.45 } }
+M["ui.open"]     = rise("bell", "D4", "A4", 3, 0.045, 0.34)
+M["ui.close"]    = fall("bell", "A4", "D4", 3, 0.045, 0.32)
+M["ui.page"]     = blip("hat", "A4", 0.24)
+M["ui.type"]     = blip("bit", "A4", 0.28)
+M["ui.launch"]   = mix(
+  rise("bit", "D4", "D5", 5, 0.035, 0.3),
+  shift(chord("pling", { "D4", "FS4", "A4" }, 0.4), 0.18))
+M["ui.trophy"]   = mix(
+  chord("bell", { "D4", "FS4", "A4" }, 0.5, 0.05),
+  shift(chord("bell", { "A4", "CS5", "E5" }, 0.55, 0.05), 0.22),
+  shift(blip("chime", "D5", 0.6), 0.44))
+M["ui.record"]   = mix(
+  rise("chime", "D4", "D5", 6, 0.06, 0.4),
+  shift(chord("bell", { "D5", "FS5" }, 0.6), 0.4))
+
+M["boot.chime"]  = mix(
+  { { 0.00, "bit", P("D4"), 0.35 }, { 0.10, "bit", P("A4"), 0.40 },
+    { 0.20, "bit", P("D5"), 0.45 } },
+  shift(chord("bell", { "D4", "FS4", "A4", "D5" }, 0.5, 0.04), 0.34))
+M["boot.shutdown"] = mix(
+  fall("bit", "D5", "D4", 4, 0.07, 0.4),
+  shift(blip("bass", "D4", 0.5), 0.3))
+
+--============================================================== outcomes
+M["result.win"] = mix(
+  chord("bell", { "D4", "FS4", "A4" }, 0.5, 0.03),
+  shift(chord("bell", { "E4", "GS4", "B4" }, 0.5, 0.03), 0.16),
+  shift(chord("bell", { "FS4", "AS4", "CS5" }, 0.55, 0.03), 0.32),
+  shift(chord("chime", { "FS4", "AS4", "CS5", "FS5" }, 0.6, 0.03), 0.52))
+M["result.lose"] = mix(
+  { { 0.00, "harp", P("D4"), 0.5 }, { 0.16, "harp", P("B3"), 0.5 },
+    { 0.32, "harp", P("G3"), 0.5 } },
+  shift(thump("bass", "FS3", 0.6), 0.5))
+M["result.levelup"] = rise("bell", "D4", "D5", 5, 0.06, 0.45)
+M["result.newwave"] = mix(
+  chord("iron_xylophone", { "D4", "A4" }, 0.45, 0.03),
+  shift(chord("iron_xylophone", { "E4", "B4" }, 0.5, 0.03), 0.14))
+
+--============================================================== snake
+M["snake.eat"]   = { { 0, "bit", P("A4"), 0.40 }, { 0.045, "bit", P("D5"), 0.44 } }
+M["snake.bonus"] = mix(
+  rise("chime", "D4", "D5", 4, 0.05, 0.45),
+  shift(blip("bell", "FS5", 0.5), 0.22))
+M["snake.grow"]  = blip("bass", "D4", 0.3)
+M["snake.die"]   = mix(
+  stab("FS3", 0.8),
+  shift(fall("didgeridoo", "D4", "FS3", 5, 0.06, 0.5), 0.06))
+
+--============================================================== tetris
+M["tet.move"]    = blip("hat", "B4", 0.18)
+M["tet.rotate"]  = { { 0, "bit", P("E4"), 0.26 }, { 0.03, "bit", P("B4"), 0.24 } }
+M["tet.wallkick"] = { { 0, "bit", P("G4"), 0.24 }, { 0.035, "bit", P("D5"), 0.26 } }
+M["tet.softdrop"] = blip("hat", "FS4", 0.14)
+M["tet.harddrop"] = mix(
+  fall("bit", "D5", "D4", 3, 0.025, 0.32),
+  shift(thump("bass", "D4", 0.5), 0.07))
+M["tet.lock"]    = thump("bass", "A3", 0.42)
+M["tet.hold"]    = { { 0, "iron_xylophone", P("A4"), 0.4 }, { 0.05, "iron_xylophone", P("E4"), 0.36 } }
+M["tet.deny"]    = blip("bass", "G3", 0.4)
+M["tet.line1"]   = rise("xylophone", "D4", "A4", 3, 0.045, 0.42)
+M["tet.line2"]   = rise("xylophone", "D4", "D5", 4, 0.045, 0.46)
+M["tet.line3"]   = rise("xylophone", "D4", "FS5", 5, 0.045, 0.5)
+M["tet.tetris"]  = mix(
+  rise("xylophone", "D4", "FS5", 6, 0.04, 0.5),
+  shift(chord("bell", { "D5", "FS5", "A4" }, 0.6, 0.03), 0.26),
+  shift(blip("chime", "FS5", 0.55), 0.42))
+M["tet.tspin"]   = mix(
+  chord("iron_xylophone", { "D4", "GS4" }, 0.5, 0.03),
+  shift(chord("iron_xylophone", { "E4", "AS4" }, 0.55, 0.03), 0.12),
+  shift(blip("chime", "E5", 0.5), 0.26))
+M["tet.b2b"]     = shift(blip("cow_bell", "D5", 0.45), 0)
+M["tet.topout"]  = mix(
+  stab("FS3", 0.9),
+  shift(fall("bass", "D4", "FS3", 6, 0.07, 0.55), 0.05))
+
+--============================================================== breakout
+M["brk.paddle"]  = blip("bit", "A4", 0.38)
+M["brk.wall"]    = blip("bit", "D4", 0.30)
+-- pitch is shifted by the game to match the brick row
+M["brk.brick"]   = { { 0, "xylophone", P("D4"), 0.42 } }
+M["brk.tough"]   = { { 0, "iron_xylophone", P("A3"), 0.4 }, { 0.03, "hat", P("D5"), 0.2 } }
+M["brk.steel"]   = blip("basedrum", 8, 0.45)
+M["brk.laser"]   = fall("bit", "FS5", "D4", 4, 0.025, 0.32)
+M["brk.powerup"] = rise("iron_xylophone", "D4", "D5", 4, 0.05, 0.45)
+M["brk.penalty"] = fall("didgeridoo", "A4", "D4", 4, 0.05, 0.4)
+M["brk.launch"]  = { { 0, "bit", P("D4"), 0.35 }, { 0.05, "bit", P("A4"), 0.38 } }
+M["brk.life"]    = mix(
+  stab("FS3", 0.75),
+  shift(fall("bass", "A3", "FS3", 4, 0.08, 0.5), 0.08))
+
+--============================================================== invaders
+-- the march is four notes cycled by the game, so it walks down a fifth
+M["inv.march1"]  = blip("bass", "D4", 0.34)
+M["inv.march2"]  = blip("bass", "C4", 0.34)
+M["inv.march3"]  = blip("bass", "AS3", 0.34)
+M["inv.march4"]  = blip("bass", "A3", 0.34)
+M["inv.shoot"]   = mix(fall("bit", "FS5", "A4", 4, 0.022, 0.34), blip("hat", "FS5", 0.16))
+M["inv.hit"]     = mix(
+  blip("snare", 6, 0.42),
+  shift(fall("bit", "A4", "D4", 3, 0.03, 0.3), 0.02))
+M["inv.ufo"]     = { { 0, "flute", P("A4"), 0.3 }, { 0.09, "flute", P("D5"), 0.3 } }
+M["inv.ufohit"]  = mix(
+  rise("chime", "D4", "FS5", 5, 0.04, 0.5),
+  shift(blip("snare", 8, 0.4), 0))
+M["inv.bomb"]    = blip("hat", "D4", 0.16)
+M["inv.shield"]  = blip("snare", 2, 0.3)
+M["inv.die"]     = mix(
+  stab("FS3", 0.9),
+  shift(roll("snare", 4, 4, 0.08, 0.5), 0.05),
+  shift(fall("didgeridoo", "D4", "FS3", 5, 0.08, 0.5), 0.1))
+
+--============================================================== minesweeper
+M["ms.reveal"]   = blip("hat", "A4", 0.18)
+M["ms.open"]     = mix(blip("hat", "A4", 0.2), shift(blip("hat", "D5", 0.16), 0.05))
+M["ms.flag"]     = { { 0, "cow_bell", P("D5"), 0.34 } }
+M["ms.unflag"]   = { { 0, "cow_bell", P("A4"), 0.28 } }
+M["ms.chord"]    = mix(blip("hat", "A4", 0.2), shift(blip("hat", "D5", 0.2), 0.04),
+  shift(blip("hat", "FS5", 0.18), 0.08))
+M["ms.boom"]     = mix(
+  stab("FS3", 1.0),
+  shift(roll("snare", 5, 5, 0.07, 0.55), 0.04),
+  shift(fall("didgeridoo", "D4", "FS3", 6, 0.07, 0.5), 0.1))
+M["ms.clear"]    = M["result.win"]
+
+--============================================================== 2048
+M["g2048.slide"] = blip("hat", "G4", 0.18)
+-- shifted by the game: bigger tiles merge higher
+M["g2048.merge"] = { { 0, "xylophone", P("D4"), 0.4 }, { 0.04, "xylophone", P("A4"), 0.36 } }
+M["g2048.spawn"] = blip("bit", "D4", 0.2)
+M["g2048.undo"]  = fall("didgeridoo", "A4", "D4", 3, 0.05, 0.35)
+M["g2048.deny"]  = blip("bass", "G3", 0.34)
+
+--============================================================== sokoban
+M["sok.step"]    = blip("hat", "D4", 0.16)
+M["sok.push"]    = { { 0, "bass", P("A3"), 0.34 }, { 0.04, "hat", P("D4"), 0.14 } }
+M["sok.ongoal"]  = { { 0, "bell", P("D5"), 0.42 }, { 0.05, "bell", P("FS5"), 0.4 } }
+M["sok.offgoal"] = { { 0, "bell", P("FS4"), 0.3 }, { 0.05, "bell", P("D4"), 0.28 } }
+M["sok.blocked"] = blip("bass", "FS3", 0.34)
+M["sok.undo"]    = fall("didgeridoo", "G4", "D4", 3, 0.05, 0.34)
+M["sok.reset"]   = fall("bit", "D5", "D4", 4, 0.04, 0.3)
+M["sok.solved"]  = M["result.win"]
+
+--============================================================== flappy
+M["fly.flap"]    = { { 0, "hat", P("D5"), 0.26 }, { 0.03, "hat", P("A4"), 0.18 } }
+M["fly.score"]   = { { 0, "bit", P("A4"), 0.36 }, { 0.045, "bit", P("E5"), 0.4 } }
+M["fly.hit"]     = mix(stab("A3", 0.8), shift(blip("snare", 5, 0.45), 0.02))
+M["fly.fall"]    = fall("didgeridoo", "A4", "FS3", 7, 0.07, 0.45)
+M["fly.medal"]   = mix(
+  chord("bell", { "D4", "FS4", "A4" }, 0.5, 0.04),
+  shift(blip("chime", "D5", 0.55), 0.26))
+
+--============================================================== pong
+M["png.paddle"]  = blip("bit", "A4", 0.4)
+M["png.wall"]    = blip("bit", "D4", 0.32)
+M["png.point"]   = rise("bit", "D4", "A4", 3, 0.05, 0.42)
+M["png.against"] = fall("bit", "A4", "D4", 3, 0.05, 0.38)
+M["png.serve"]   = blip("hat", "D5", 0.22)
+
+--============================================================== meteors
+M["met.fire"]    = fall("bit", "FS5", "D5", 3, 0.02, 0.3)
+M["met.thrust"]  = blip("hat", "FS3", 0.12)
+M["met.rock1"]   = mix(blip("snare", 10, 0.34), blip("bit", "FS4", 0.24))
+M["met.rock2"]   = mix(blip("snare", 6, 0.4), blip("bit", "D4", 0.26))
+M["met.rock3"]   = mix(blip("basedrum", 4, 0.5), blip("snare", 3, 0.36))
+M["met.ufo"]     = { { 0, "didgeridoo", P("D4"), 0.3 }, { 0.12, "didgeridoo", P("A3"), 0.3 } }
+M["met.ufohit"]  = mix(rise("chime", "D4", "FS5", 4, 0.04, 0.5), blip("snare", 8, 0.4))
+M["met.hyper"]   = mix(
+  rise("bit", "D4", "FS5", 6, 0.03, 0.3),
+  shift(fall("bit", "FS5", "D4", 6, 0.03, 0.3), 0.18))
+M["met.die"]     = mix(
+  stab("FS3", 1.0),
+  shift(roll("snare", 6, 5, 0.08, 0.5), 0.05),
+  shift(fall("didgeridoo", "A4", "FS3", 6, 0.09, 0.5), 0.12))
+M["met.extra"]   = rise("chime", "D4", "D5", 5, 0.05, 0.5)
+
+--============================================================== lights out
+M["lo.on"]       = { { 0, "bell", P("A4"), 0.36 }, { 0.04, "bell", P("E5"), 0.34 } }
+M["lo.off"]      = { { 0, "bell", P("E4"), 0.3 }, { 0.04, "bell", P("A3"), 0.28 } }
+M["lo.solved"]   = mix(
+  rise("chime", "D4", "D5", 5, 0.05, 0.45),
+  shift(chord("bell", { "D5", "FS5" }, 0.55, 0.03), 0.28))
+
+--============================================================== simon
+-- the four panels; the game plays these directly by index
+M["sim.pad1"]    = blip("harp", "D4", 0.7)
+M["sim.pad2"]    = blip("harp", "G4", 0.7)
+M["sim.pad3"]    = blip("harp", "B4", 0.7)
+M["sim.pad4"]    = blip("harp", "D5", 0.7)
+M["sim.wrong"]   = mix(
+  { { 0, "didgeridoo", P("G3"), 0.6 }, { 0.1, "didgeridoo", P("FS3"), 0.55 } },
+  blip("snare", 2, 0.4))
+M["sim.round"]   = { { 0, "bit", P("D5"), 0.34 }, { 0.05, "bit", P("A4"), 0.3 } }
+
+--============================================================== connect four
+M["c4.move"]     = blip("hat", "A4", 0.18)
+M["c4.drop"]     = mix(
+  fall("bit", "A4", "D4", 3, 0.03, 0.28),
+  shift(thump("bass", "D4", 0.42), 0.08))
+M["c4.think"]    = blip("hat", "D4", 0.1)
+M["c4.full"]     = blip("bass", "G3", 0.34)
+M["c4.win"]      = M["result.win"]
+M["c4.lose"]     = M["result.lose"]
+M["c4.draw"]     = { { 0, "iron_xylophone", P("D4"), 0.4 }, { 0.14, "iron_xylophone", P("D4"), 0.35 } }
+
+------------------------------------------------------------------- lookup
+sfx.table = M
+
+function sfx.get(name) return M[name] end
+
+function sfx.names()
+  local out = {}
+  for name in pairs(M) do out[#out + 1] = name end
+  table.sort(out)
+  return out
+end
+
+--- Longest effect, in seconds: used by the sound test to pace auditions.
+function sfx.duration(name)
+  local def = M[name]
+  if not def then return 0 end
+  local last = 0
+  for i = 1, #def do
+    if def[i][1] > last then last = def[i][1] end
+  end
+  return last
+end
+
+return sfx
 ]=])
 file("gameos/lib/ui.lua", [=[
 --[[ ui -- modal dialogs and list pickers shared by the shell and the runtime.
@@ -7972,16 +8780,16 @@ function ui.dialog(opts)
       local k = ev[2]
       if k == keys.left or k == keys.a then
         sel = sel > 1 and sel - 1 or #buttons
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.right or k == keys.d or k == keys.tab then
         sel = sel < #buttons and sel + 1 or 1
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
-        audio.play("select")
+        audio.play("ui.select")
         return sel
       elseif k == keys.backspace or k == keys.q then
         if opts.cancel ~= 0 then
-          audio.play("back")
+          audio.play("ui.back")
           return opts.cancel or 0
         end
       end
@@ -7990,7 +8798,7 @@ function ui.dialog(opts)
       local i = hitTest(rects, mx, my)
       if i then
         sel = i
-        audio.play("select")
+        audio.play("ui.select")
         return i
       end
     end
@@ -8097,10 +8905,10 @@ function ui.picker(opts)
       local k = ev[2]
       if k == keys.up or k == keys.w then
         sel = sel > 1 and sel - 1 or #items
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.down or k == keys.s then
         sel = sel < #items and sel + 1 or 1
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.pageUp then
         sel = math.max(1, sel - rows)
       elseif k == keys.pageDown then
@@ -8110,10 +8918,10 @@ function ui.picker(opts)
       elseif k == keys["end"] then
         sel = #items
       elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
-        audio.play("select")
+        audio.play("ui.select")
         return sel
       elseif k == keys.backspace or k == keys.q then
-        audio.play("back")
+        audio.play("ui.back")
         return 0
       end
     elseif name == "mouse_scroll" then
@@ -8126,14 +8934,14 @@ function ui.picker(opts)
         local i = top + row
         if i <= #items then
           if i == sel then
-            audio.play("select")
+            audio.play("ui.select")
             return i
           end
           sel = i
-          audio.play("move")
+          audio.play("ui.move")
         end
       elseif mx < x or mx >= x + w or my < y or my >= y + h then
-        audio.play("back")
+        audio.play("ui.back")
         return 0
       end
     end
@@ -8238,17 +9046,17 @@ function ui.initials(title, accent, previous)
       if at then
         letters[slot] = at
         if slot < 3 then slot = slot + 1 end
-        audio.play("move")
+        audio.play("ui.move")
       end
       return nil
     end
     local k = ev[2]
     if k == keys.up or k == keys.w then
       letters[slot] = letters[slot] % #ALPHABET + 1
-      audio.play("move")
+      audio.play("ui.move")
     elseif k == keys.down or k == keys.s then
       letters[slot] = (letters[slot] - 2) % #ALPHABET + 1
-      audio.play("move")
+      audio.play("ui.move")
     elseif k == keys.left or k == keys.a then
       slot = slot > 1 and slot - 1 or 3
     elseif k == keys.right or k == keys.d or k == keys.tab then
@@ -8256,7 +9064,7 @@ function ui.initials(title, accent, previous)
     elseif k == keys.backspace then
       letters[slot] = 1
     elseif k == keys.enter or k == keys.numPadEnter or k == keys.space then
-      audio.play("select")
+      audio.play("ui.select")
       return text()
     end
     return nil
@@ -8379,11 +9187,11 @@ function about.run(api)
         end
         ui.alert(" Load errors ", body, colors.red)
       elseif k == keys.backspace or k == keys.q or k == keys.enter or k == keys.space then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     elseif ev[1] == "mouse_click" then
-      audio.play("back")
+      audio.play("ui.back")
       return 1
     end
     return nil
@@ -8528,12 +9336,12 @@ function scores.run(api)
       local k = ev[2]
       if k == keys.up or k == keys.w then
         sel = sel > 1 and sel - 1 or #games
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.down or k == keys.s then
         sel = sel < #games and sel + 1 or 1
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.backspace or k == keys.q or k == keys.enter then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     elseif name == "mouse_scroll" then
@@ -8543,9 +9351,9 @@ function scores.run(api)
       local i = top + (my - 3)
       if mx <= 21 and games[i] then
         sel = i
-        audio.play("move")
+        audio.play("ui.move")
       elseif my >= 18 then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     end
@@ -8574,13 +9382,22 @@ local settings = {}
 
 local floor = math.floor
 
-local VOLUMES = { 0, 0.5, 1, 2, 3 }
-local VOLUME_NAMES = { "Off", "Quiet", "Normal", "Loud", "Max" }
-
-local function volumeIndex()
-  local v = data.get("volume")
-  for i = 1, #VOLUMES do if math.abs(VOLUMES[i] - v) < 0.01 then return i end end
-  return 3
+--- A knob renders as a ten-segment bar plus a number, so a glance tells you
+--- where it sits without reading the value.
+local function knob(label, key, field, preview)
+  return {
+    label = label,
+    value = function() return data.get(key) end,
+    get = function() return data.get(key) .. "/10" end,
+    bar = function() return data.get(key) / 10 end,
+    cycle = function(dir)
+      local v = data.get(key) + dir
+      if v < 0 then v = 10 elseif v > 10 then v = 0 end
+      data.set(key, v)
+      audio.volumes[field] = v / 10
+      if preview then preview(v) end
+    end,
+  }
 end
 
 function settings.run(api)
@@ -8594,35 +9411,21 @@ function settings.run(api)
       data.set("theme", gfx.themes[gfx.themeIndex].id)
     end,
   }
+  rows[#rows + 1] = { spacer = true }
+  rows[#rows + 1] = knob("Master volume", "volMaster", "master", function(v)
+    if v > 0 then audio.play("ui.select") end
+  end)
+  rows[#rows + 1] = knob("Music volume", "volMusic", "music", function(v)
+    if v > 0 then audio.playMusic("standby") end
+  end)
+  rows[#rows + 1] = knob("Effect volume", "volSfx", "sfx", function(v)
+    if v > 0 then audio.play("result.levelup") end
+  end)
   rows[#rows + 1] = {
-    label = "Sound effects",
-    get = function() return audio.sfxOn and "On" or "Off" end,
-    cycle = function()
-      audio.sfxOn = not audio.sfxOn
-      data.set("sfx", audio.sfxOn)
-      if audio.sfxOn then audio.play("select") end
-    end,
+    label = "Sound test",
+    action = function() req("os.soundtest").run(api) end,
   }
-  rows[#rows + 1] = {
-    label = "Menu music",
-    get = function() return audio.musicOn and "On" or "Off" end,
-    cycle = function()
-      audio.musicOn = not audio.musicOn
-      data.set("music", audio.musicOn)
-      if audio.musicOn then audio.playMusic("menu") else audio.stopMusic() end
-    end,
-  }
-  rows[#rows + 1] = {
-    label = "Volume",
-    get = function() return VOLUME_NAMES[volumeIndex()] end,
-    cycle = function(dir)
-      local i = volumeIndex() + dir
-      if i < 1 then i = #VOLUMES elseif i > #VOLUMES then i = 1 end
-      audio.volume = VOLUMES[i]
-      data.set("volume", VOLUMES[i])
-      audio.play("select")
-    end,
-  }
+  rows[#rows + 1] = { spacer = true }
   rows[#rows + 1] = {
     label = "Frame counter",
     get = function() return data.get("showFps") and "On" or "Off" end,
@@ -8641,7 +9444,7 @@ function settings.run(api)
         data.state.scores = {}
         data.markDirty()
         data.save()
-        audio.play("deny")
+        audio.play("ui.deny")
       end
     end,
   }
@@ -8650,11 +9453,11 @@ function settings.run(api)
     action = function()
       if ui.confirm(" Factory reset ", { "Erase scores, progress", "and settings?" }, "Erase", "Cancel", colors.red) then
         data.wipe()
-        audio.sfxOn = data.get("sfx")
-        audio.musicOn = data.get("music")
-        audio.volume = data.get("volume")
+        audio.volumes.master = data.get("volMaster") / 10
+        audio.volumes.music = data.get("volMusic") / 10
+        audio.volumes.sfx = data.get("volSfx") / 10
         gfx.applyTheme(gfx.themeByID(data.get("theme")))
-        audio.play("deny")
+        audio.play("ui.deny")
       end
     end,
   }
@@ -8669,7 +9472,7 @@ function settings.run(api)
       if i < 1 then i = #rows elseif i > #rows then i = 1 end
       if not rows[i].spacer then
         sel = i
-        audio.play("move")
+        audio.play("ui.move")
         return
       end
     end
@@ -8694,6 +9497,11 @@ function settings.run(api)
           local fg = on and gfx.contrast(colors.lightBlue) or colors.white
           gfx.fill(3, y, gfx.W - 4, 1, bg)
           gfx.text(4, y, row.label, fg, bg)
+          if row.bar then
+            -- the knob's own level, drawn behind the label
+            gfx.bar(gfx.W - 20, y, 10, row.bar(), on and gfx.contrast(colors.lightBlue) or colors.lime,
+              on and colors.lightBlue or colors.gray)
+          end
           if row.get then
             local value = row.get()
             gfx.right(gfx.W - 4, y, value, on and fg or colors.lime, bg)
@@ -8731,20 +9539,20 @@ function settings.run(api)
         step(1)
       elseif k == keys.left or k == keys.a then
         local row = rows[sel]
-        if row.cycle then row.cycle(-1) audio.play("move") end
+        if row.cycle then row.cycle(-1) audio.play("ui.move") end
       elseif k == keys.right or k == keys.d then
         local row = rows[sel]
-        if row.cycle then row.cycle(1) audio.play("move") end
+        if row.cycle then row.cycle(1) audio.play("ui.move") end
       elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
         local row = rows[sel]
         if row.action then
           row.action()
         elseif row.cycle then
           row.cycle(1)
-          audio.play("select")
+          audio.play("ui.select")
         end
       elseif k == keys.backspace or k == keys.q then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     elseif name == "mouse_click" then
@@ -8758,11 +9566,11 @@ function settings.run(api)
           elseif row.cycle then
             -- clicking the left chevron steps back, anywhere else steps on
             row.cycle(mx == gfx.W - 5 - #row.get() and -1 or 1)
-            audio.play("select")
+            audio.play("ui.select")
           end
         else
           sel = i
-          audio.play("move")
+          audio.play("ui.move")
         end
       end
     end
@@ -8940,7 +9748,7 @@ function shell.run(api)
       i = i + dir
       if i < 1 then i = #entries elseif i > #entries then i = 1 end
       if selectable(entries[i]) then
-        if i ~= sel then audio.play("move") end
+        if i ~= sel then audio.play("ui.move") end
         sel = i
         return
       end
@@ -8959,7 +9767,7 @@ function shell.run(api)
           i = i % n + 1
           if selectable(entries[i]) then
             sel = i
-            audio.play("select")
+            audio.play("ui.select")
             return
           end
         end
@@ -9097,21 +9905,21 @@ function shell.run(api)
 
   local function launch(e)
     if e.kind == "game" then
-      audio.play("select")
+      audio.play("ui.select")
       ui.transition(e.def.accent or colors.lightBlue)
       api.runtime.play(e.def, api)
       ui.transition(e.def.accent or colors.lightBlue)
     elseif e.id == "scores" then
-      audio.play("select")
+      audio.play("ui.select")
       req("os.scores").run(api)
     elseif e.id == "trophies" then
-      audio.play("select")
+      audio.play("ui.select")
       req("os.trophies").run(api)
     elseif e.id == "settings" then
-      audio.play("select")
+      audio.play("ui.select")
       req("os.settings").run(api)
     elseif e.id == "about" then
-      audio.play("select")
+      audio.play("ui.select")
       req("os.about").run(api)
     elseif e.id == "power" then
       if (not data.get("confirmExit")) or ui.confirm(" Power Off ", "Leave GameOS?", "Power off", "Stay") then
@@ -9121,7 +9929,7 @@ function shell.run(api)
     end
     ui.terminated = false
     -- the runtime stops the menu track while a game is running
-    audio.playMusic("menu")
+    audio.playMusic("standby")
     os.cancelTimer(timer)
     timer = os.startTimer(FRAME)
     idle = 0
@@ -9138,14 +9946,14 @@ function shell.run(api)
       local e = entries[i]
       if selectable(e) and labelOf(e):sub(1, 1):lower() == ch then
         sel = i
-        audio.play("move")
+        audio.play("ui.move")
         return true
       end
     end
     return false
   end
 
-  audio.playMusic("menu")
+  audio.playMusic("standby")
 
   while running do
     local ev = { os.pullEventRaw() }
@@ -9223,7 +10031,7 @@ function shell.run(api)
               launch(e)
             else
               sel = i
-              audio.play("move")
+              audio.play("ui.move")
             end
           end
         elseif mx >= PANEL_X then
@@ -9247,6 +10055,207 @@ function shell.run(api)
 end
 
 return shell
+]=])
+file("gameos/os/soundtest.lua", [=[
+--[[ soundtest -- audition every sound the console makes.
+
+  Useful for setting the volume knobs, and for hearing what a game is about
+  to throw at you before it does.
+]]
+
+local req = ...
+local gfx = req("lib.gfx")
+local audio = req("lib.audio")
+local sfx = req("lib.sfx")
+local data = req("lib.data")
+local music = req("lib.music")
+local ui = req("lib.ui")
+
+local soundtest = {}
+
+local floor = math.floor
+local ROWS = 13
+local LIST_Y = 5
+
+--- Effects grouped by their name prefix, with songs on the end.
+local function build()
+  local GROUPS = {
+    ui = "Console", boot = "Console", result = "Outcomes",
+    snake = "Snake", tet = "Tetris", brk = "Breakout", inv = "Invaders",
+    ms = "Minesweeper", g2048 = "2048", sok = "Sokoban", fly = "Flappy",
+    png = "Pong", met = "Meteors", lo = "Lights Out", sim = "Simon",
+    c4 = "Connect Four",
+  }
+  local order = {
+    "Console", "Outcomes", "Snake", "Tetris", "Breakout", "Invaders",
+    "Minesweeper", "2048", "Sokoban", "Flappy", "Pong", "Meteors",
+    "Lights Out", "Simon", "Connect Four",
+  }
+  local buckets = {}
+  for _, name in ipairs(sfx.names()) do
+    local prefix = name:match("^([^.]+)")
+    local group = GROUPS[prefix] or "Other"
+    buckets[group] = buckets[group] or {}
+    table.insert(buckets[group], name)
+  end
+
+  local rows = {}
+  for _, group in ipairs(order) do
+    if buckets[group] then
+      rows[#rows + 1] = { header = group }
+      for _, name in ipairs(buckets[group]) do
+        rows[#rows + 1] = { sound = name }
+      end
+    end
+  end
+  rows[#rows + 1] = { header = "Music" }
+  for _, id in ipairs(music.names()) do
+    rows[#rows + 1] = { song = id }
+  end
+  return rows
+end
+
+function soundtest.run(api)
+  local rows = build()
+  local sel = 1
+  while rows[sel] and rows[sel].header do sel = sel + 1 end
+  local top = 1
+  local playing = nil
+
+  local function clampView()
+    if sel < top then top = sel end
+    if sel > top + ROWS - 1 then top = sel - ROWS + 1 end
+    local maxTop = math.max(1, #rows - ROWS + 1)
+    if top > maxTop then top = maxTop end
+    if top < 1 then top = 1 end
+  end
+
+  local function move(dir)
+    local i = sel
+    for _ = 1, #rows do
+      i = i + dir
+      if i < 1 then i = #rows elseif i > #rows then i = 1 end
+      if not rows[i].header then
+        sel = i
+        return
+      end
+    end
+  end
+
+  local function activate()
+    local row = rows[sel]
+    if not row then return end
+    if row.sound then
+      audio.play(row.sound)
+    elseif row.song then
+      if audio.musicName() == row.song then
+        audio.stopMusic()
+        playing = nil
+      else
+        audio.playMusic(row.song)
+        playing = row.song
+      end
+    end
+  end
+
+  local function draw()
+    gfx.clear(colors.black)
+    gfx.fill(1, 1, gfx.W, 1, colors.gray)
+    gfx.text(2, 1, "SOUND TEST", colors.white, colors.gray)
+    gfx.right(gfx.W - 1, 1, #sfx.names() .. " effects", colors.lightGray, colors.gray)
+    gfx.rule(1, 2, gfx.W, colors.magenta, colors.black)
+
+    -- the three knobs, so you can hear what you are setting
+    gfx.text(2, 3, "MASTER", colors.lightGray, colors.black)
+    gfx.bar(9, 3, 10, audio.volumes.master, colors.lime, colors.gray)
+    gfx.text(21, 3, "MUSIC", colors.lightGray, colors.black)
+    gfx.bar(27, 3, 10, audio.volumes.music, colors.cyan, colors.gray)
+    gfx.text(39, 3, "FX", colors.lightGray, colors.black)
+    gfx.bar(42, 3, 8, audio.volumes.sfx, colors.orange, colors.black)
+
+    clampView()
+    for i = 0, ROWS - 1 do
+      local row = rows[top + i]
+      local y = LIST_Y + i
+      gfx.fill(1, y, gfx.W, 1, colors.black)
+      if row then
+        if row.header then
+          gfx.text(2, y, row.header, colors.magenta, colors.black)
+          gfx.rule(3 + #row.header, y, gfx.W - 4 - #row.header, colors.gray, colors.black)
+        else
+          local on = (top + i == sel)
+          local bg = on and colors.magenta or colors.black
+          local fg = on and gfx.contrast(colors.magenta) or colors.white
+          gfx.fill(2, y, gfx.W - 2, 1, bg)
+          if row.sound then
+            gfx.text(4, y, gfx.clip(row.sound, 26), fg, bg)
+            gfx.right(gfx.W - 2, y,
+              string.format("%.2fs", sfx.duration(row.sound)),
+              on and fg or colors.lightGray, bg)
+          else
+            gfx.text(4, y, gfx.clip(music.title(row.song), 26), fg, bg)
+            local tag = (audio.musicName() == row.song) and "playing" or
+              string.format("%.0fs", music.length(row.song))
+            gfx.right(gfx.W - 2, y, tag, on and fg or colors.lightGray, bg)
+          end
+        end
+      end
+    end
+
+    gfx.rule(1, 18, gfx.W, colors.gray, colors.black)
+    gfx.text(2, 19, "Enter", colors.magenta, colors.black)
+    gfx.text(8, 19, "play", colors.lightGray, colors.black)
+    gfx.text(14, 19, "Left/Right", colors.magenta, colors.black)
+    gfx.text(25, 19, "master", colors.lightGray, colors.black)
+    gfx.text(33, 19, "Q", colors.magenta, colors.black)
+    gfx.text(35, 19, "back", colors.lightGray, colors.black)
+  end
+
+  local function handle(ev)
+    if ev[1] == "key" then
+      local k = ev[2]
+      if k == keys.up or k == keys.w then
+        move(-1)
+      elseif k == keys.down or k == keys.s then
+        move(1)
+      elseif k == keys.left or k == keys.a or k == keys.right or k == keys.d then
+        local step = (k == keys.left or k == keys.a) and -1 or 1
+        local v = math.floor(audio.volumes.master * 10 + 0.5) + step
+        v = math.max(0, math.min(10, v))
+        audio.volumes.master = v / 10
+        data.set("volMaster", v)
+      elseif k == keys.enter or k == keys.space then
+        activate()
+      elseif k == keys.pageUp then
+        for _ = 1, ROWS do move(-1) end
+      elseif k == keys.pageDown then
+        for _ = 1, ROWS do move(1) end
+      elseif k == keys.backspace or k == keys.q then
+        audio.stopMusic()
+        audio.play("ui.back")
+        return 1
+      end
+    elseif ev[1] == "mouse_scroll" then
+      move(ev[2] > 0 and 1 or -1)
+    elseif ev[1] == "mouse_click" then
+      local mx, my = ui.toLocal(ev[3], ev[4])
+      local i = top + (my - LIST_Y)
+      if rows[i] and not rows[i].header then
+        sel = i
+        activate()
+      elseif my >= 18 then
+        audio.stopMusic()
+        audio.play("ui.back")
+        return 1
+      end
+    end
+    return nil
+  end
+
+  ui.loop(draw, handle)
+end
+
+return soundtest
 ]=])
 file("gameos/os/splash.lua", [=[
 --[[ splash -- the boot animation.
@@ -9279,7 +10288,7 @@ function splash.run(api)
   end
   local shades = { colors.gray, colors.lightGray, colors.white }
 
-  audio.play("boot")
+  audio.play("boot.chime")
 
   local t = 0
   local timer = os.startTimer(0.05)
@@ -9494,7 +10503,7 @@ function trophies.run(api)
       elseif k == keys["end"] then
         top = maxTop
       elseif k == keys.backspace or k == keys.q or k == keys.enter then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     elseif ev[1] == "mouse_scroll" then
@@ -9502,7 +10511,7 @@ function trophies.run(api)
     elseif ev[1] == "mouse_click" then
       local _, my = ui.toLocal(ev[3], ev[4])
       if my >= 18 then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     end

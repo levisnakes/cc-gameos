@@ -65,6 +65,7 @@ function Game:serve(dir)
   self.rallies = 0
   self.cpuTarget = (COURT_TOP + COURT_BOTTOM) / 2
   self:cpuAim()
+  audio.play("png.serve")
 end
 
 --------------------------------------------------------------------- input
@@ -121,12 +122,12 @@ function Game:point(side)
     self.rightScore = self.rightScore + 1
   end
   self.flash = 0.3
-  audio.play(side == "left" and "coin" or "deny")
+  audio.play(side == "left" and "png.point" or "png.against")
   if self.leftScore >= TARGET or self.rightScore >= TARGET then
     self.finished = true
     self.won = self.leftScore > self.rightScore
     self.score = self.leftScore * 100 + max(0, self.leftScore - self.rightScore) * 50 + self.longestRally * 10
-    audio.play(self.won and "win" or "gameover")
+    audio.play(self.won and "result.win" or "result.lose")
     return
   end
   self:serve(side == "left" and 1 or -1)
@@ -167,12 +168,12 @@ function Game:update(dt)
       b.y = COURT_TOP
       b.vy = abs(b.vy)
       sy = -sy
-      audio.play("bounce")
+      audio.play("png.wall")
     elseif b.y + 2 > COURT_BOTTOM then
       b.y = COURT_BOTTOM - 2
       b.vy = -abs(b.vy)
       sy = -sy
-      audio.play("bounce")
+      audio.play("png.wall")
     end
 
     if b.vx < 0 and b.x <= LEFT_X + PADDLE_W and b.x >= LEFT_X - 3 then
@@ -213,7 +214,8 @@ function Game:bounce(b, paddleY, dir)
   if dir > 0 then self:cpuAim() end
   self.rallies = self.rallies + 1
   if self.rallies > self.longestRally then self.longestRally = self.rallies end
-  audio.play("blip", min(10, self.rallies))
+  -- the rally climbs in pitch, so a long exchange audibly tightens
+  audio.play("png.paddle", min(10, self.rallies))
 end
 
 ---------------------------------------------------------------------- draw
@@ -280,6 +282,7 @@ return {
   accent = colors.cyan,
   order = 90,
   cover = cover,
+  music = "ricochet",
   controls = {
     { "W / S", "Left paddle" },
     { "Up / Down", "Left paddle" },

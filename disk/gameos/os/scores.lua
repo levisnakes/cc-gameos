@@ -112,12 +112,12 @@ function scores.run(api)
       local k = ev[2]
       if k == keys.up or k == keys.w then
         sel = sel > 1 and sel - 1 or #games
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.down or k == keys.s then
         sel = sel < #games and sel + 1 or 1
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.backspace or k == keys.q or k == keys.enter then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     elseif name == "mouse_scroll" then
@@ -127,9 +127,9 @@ function scores.run(api)
       local i = top + (my - 3)
       if mx <= 21 and games[i] then
         sel = i
-        audio.play("move")
+        audio.play("ui.move")
       elseif my >= 18 then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     end

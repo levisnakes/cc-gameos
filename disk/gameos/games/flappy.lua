@@ -92,7 +92,7 @@ function Game:flap()
   if self.state == "play" then
     self.vy = -46
     self.wing = 0.18
-    audio.play("flap")
+    audio.play("fly.flap")
   end
 end
 
@@ -131,8 +131,8 @@ function Game:die()
   if self.state == "dead" then return end
   self.state = "dead"
   self.deathTimer = 1.1
-  audio.play("hit")
-  audio.play("gameover")
+  audio.play("fly.hit")
+  audio.play("fly.fall")
 end
 
 function Game:update(dt)
@@ -168,7 +168,7 @@ function Game:update(dt)
     if not p.passed and p.x + PIPE_W < BIRD_X then
       p.passed = true
       self.score = self.score + 1
-      audio.play("coin", min(10, self.score))
+      audio.play("fly.score", min(10, self.score))
     end
     if p.x + PIPE_W < 0 then
       local rightmost = 0
@@ -321,6 +321,7 @@ return {
   accent = colors.yellow,
   order = 80,
   cover = cover,
+  music = "updraft",
   scoreLabel = "PIPES",
   controls = {
     { "Space / Up", "Flap" },

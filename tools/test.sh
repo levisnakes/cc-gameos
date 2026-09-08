@@ -35,6 +35,8 @@ echo "== game rules =="
 run "logic" tests/t_logic.lua
 run "connect four opponent" tests/t_ai.lua
 run "trophies and initials" tests/t_trophy.lua
+run "sound system" tests/t_sound.lua
+run "soundtrack" tests/t_pianoroll.lua
 
 echo "== rendering cost =="
 run "per-frame budget" tests/t_bench.lua

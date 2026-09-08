@@ -169,8 +169,12 @@ Shared across the console:
 - **High score tables**, top five per game, with a browser screen.
 - **Play statistics** — plays and total time per game.
 - **Per-game progress** — Sokoban remembers your level and best move counts.
-- **Sound** through a Speaker: non-blocking effects (a six-note explosion costs
-  no frame time) plus an optional menu chiptune. Silent no-op with no speaker.
+- **Sound.** 113 hand-written effects -- one per action, not one per category
+  -- and nine original songs, one per game. A speaker takes eight notes a tick,
+  so the engine is a budgeted mixer: effects are scheduled ahead and cost no
+  frame time, and music yields its last notes so gameplay feedback is never
+  masked. Three independent volume knobs (master, music, effects) and a sound
+  test screen to audition everything. Silent no-op with no speaker attached.
 - **Screensaver** after 45 idle seconds.
 - **Screen transitions** between the launcher and a game.
 - **Crash containment** — a game that errors shows a dialog and returns you to
@@ -193,14 +197,16 @@ disk/
       canvas.lua         102x57 square-pixel framebuffer (the interesting bit)
       font.lua           4x5 pixel font with variable-width M/N/W
       input.lua          key/mouse state, arcade-style auto-repeat
-      audio.lua          non-blocking speaker scheduler, effects, music
+      audio.lua          budgeted mixer, volumes, tracker playback
+      sfx.lua            113 effects, built from a small set of shapes
+      music.lua          nine original songs in a pattern/order tracker
       data.lua           settings, high scores, progress, stats
       ui.lua             modal dialogs, pickers, transitions, name entry
       runtime.lua        the game loop, pause menu, trophies, game-over card
     os/
       splash.lua         boot animation
       shell.lua          the launcher
-      settings.lua scores.lua trophies.lua about.lua
+      settings.lua scores.lua trophies.lua soundtest.lua about.lua
     games/               one file per game, auto-discovered at boot
 ```
 
@@ -229,6 +235,61 @@ conventions keep everything crisp:
   pixels, which is exactly two cells wide and one tall, so the well renders
   pixel-perfect.
 - Put text baselines on y = 3k + 1 and leave six pixels between lines.
+
+### Sound
+
+A ComputerCraft speaker gives you sixteen instruments, two octaves of pitch,
+and **eight notes per tick**. That last number is the whole design constraint,
+so `audio.lua` is a budgeted mixer rather than a pile of `playNote` calls:
+
+- **Effects are scheduled, not played.** An effect is a list of
+  `{delay, instrument, pitch, volume}` events; the engine fires them when they
+  come due, so a nine-note explosion costs the same at the point of impact as
+  a click.
+- **Music yields.** The tracker reserves the last few notes of every tick for
+  effects, so the soundtrack can never drown out the feedback that tells you
+  what just happened.
+- **Three knobs.** Master, music and effects scale independently into the
+  speaker's 0..3 range.
+
+`sfx.lua` holds 113 effects built from seven shapes — `blip`, `rise`, `fall`,
+`stab`, `chord`, `roll`, `thump` — so a new sound is usually one line:
+
+```lua
+M["mygame.win"] = rise("bell", "D4", "D5", 5, 0.06, 0.45)
+```
+
+Games can shift a sound's pitch at the call site, which is how Breakout plays
+a scale as the wall comes down and Pong's rally audibly tightens:
+
+```lua
+audio.play("brk.brick", (ROWS - row) * 2)
+```
+
+`music.lua` holds nine original songs in a small tracker format: sixteen-row
+patterns, an order list, and tempo in ticks per row.
+
+```lua
+song("mytheme", {
+  tempo = 3,                      -- 0.15s per row
+  order = { "a", "a", "b", "a" },
+  patterns = {
+    a = {
+      { "pling", 0.42, "D4 .  A4 .  F4 .  A4 .  D5 .  A4 .  C5 .  A4 ." },
+      { "bass",  0.50, "D4 .  .  .  .  .  .  .  A3 .  .  .  .  .  .  ." },
+    },
+  },
+})
+```
+
+A game picks its soundtrack with `music = "mytheme"` in its definition, or
+`music = false` to run in silence — which is what Simon does, because there
+the sequence *is* the puzzle.
+
+Everything sits inside F#3 to F#5, the speaker's real range. The suite fails
+on a note outside it, an instrument that does not exist, an `audio.play` name
+that is not defined, or anything that would ask the speaker for a ninth note
+in a tick.
 
 ### Adding a game
 
@@ -312,6 +373,12 @@ What it covers:
   blocking threats and capping vertical threes, and the three difficulties are
   played off against the same reference opponent over all seven openings to
   prove the ladder is real rather than nominal.
+- **The sound system** — every effect and song is checked for valid
+  instruments and in-range notes, every `audio.play` call site is resolved
+  against the effect table so a typo cannot ship, the volume knobs are proved
+  to silence and restore their channels, and the whole thing is driven with
+  music plus effect spam to prove it never asks the speaker for more than the
+  eight notes a tick it can take.
 - **Rendering budget** — every game is measured for pixel writes, cell
   resolutions and characters pushed per frame, and the suite fails if the
   worst case leaves the budget.

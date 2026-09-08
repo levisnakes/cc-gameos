@@ -14,13 +14,22 @@ local settings = {}
 
 local floor = math.floor
 
-local VOLUMES = { 0, 0.5, 1, 2, 3 }
-local VOLUME_NAMES = { "Off", "Quiet", "Normal", "Loud", "Max" }
-
-local function volumeIndex()
-  local v = data.get("volume")
-  for i = 1, #VOLUMES do if math.abs(VOLUMES[i] - v) < 0.01 then return i end end
-  return 3
+--- A knob renders as a ten-segment bar plus a number, so a glance tells you
+--- where it sits without reading the value.
+local function knob(label, key, field, preview)
+  return {
+    label = label,
+    value = function() return data.get(key) end,
+    get = function() return data.get(key) .. "/10" end,
+    bar = function() return data.get(key) / 10 end,
+    cycle = function(dir)
+      local v = data.get(key) + dir
+      if v < 0 then v = 10 elseif v > 10 then v = 0 end
+      data.set(key, v)
+      audio.volumes[field] = v / 10
+      if preview then preview(v) end
+    end,
+  }
 end
 
 function settings.run(api)
@@ -34,35 +43,21 @@ function settings.run(api)
       data.set("theme", gfx.themes[gfx.themeIndex].id)
     end,
   }
+  rows[#rows + 1] = { spacer = true }
+  rows[#rows + 1] = knob("Master volume", "volMaster", "master", function(v)
+    if v > 0 then audio.play("ui.select") end
+  end)
+  rows[#rows + 1] = knob("Music volume", "volMusic", "music", function(v)
+    if v > 0 then audio.playMusic("standby") end
+  end)
+  rows[#rows + 1] = knob("Effect volume", "volSfx", "sfx", function(v)
+    if v > 0 then audio.play("result.levelup") end
+  end)
   rows[#rows + 1] = {
-    label = "Sound effects",
-    get = function() return audio.sfxOn and "On" or "Off" end,
-    cycle = function()
-      audio.sfxOn = not audio.sfxOn
-      data.set("sfx", audio.sfxOn)
-      if audio.sfxOn then audio.play("select") end
-    end,
+    label = "Sound test",
+    action = function() req("os.soundtest").run(api) end,
   }
-  rows[#rows + 1] = {
-    label = "Menu music",
-    get = function() return audio.musicOn and "On" or "Off" end,
-    cycle = function()
-      audio.musicOn = not audio.musicOn
-      data.set("music", audio.musicOn)
-      if audio.musicOn then audio.playMusic("menu") else audio.stopMusic() end
-    end,
-  }
-  rows[#rows + 1] = {
-    label = "Volume",
-    get = function() return VOLUME_NAMES[volumeIndex()] end,
-    cycle = function(dir)
-      local i = volumeIndex() + dir
-      if i < 1 then i = #VOLUMES elseif i > #VOLUMES then i = 1 end
-      audio.volume = VOLUMES[i]
-      data.set("volume", VOLUMES[i])
-      audio.play("select")
-    end,
-  }
+  rows[#rows + 1] = { spacer = true }
   rows[#rows + 1] = {
     label = "Frame counter",
     get = function() return data.get("showFps") and "On" or "Off" end,
@@ -81,7 +76,7 @@ function settings.run(api)
         data.state.scores = {}
         data.markDirty()
         data.save()
-        audio.play("deny")
+        audio.play("ui.deny")
       end
     end,
   }
@@ -90,11 +85,11 @@ function settings.run(api)
     action = function()
       if ui.confirm(" Factory reset ", { "Erase scores, progress", "and settings?" }, "Erase", "Cancel", colors.red) then
         data.wipe()
-        audio.sfxOn = data.get("sfx")
-        audio.musicOn = data.get("music")
-        audio.volume = data.get("volume")
+        audio.volumes.master = data.get("volMaster") / 10
+        audio.volumes.music = data.get("volMusic") / 10
+        audio.volumes.sfx = data.get("volSfx") / 10
         gfx.applyTheme(gfx.themeByID(data.get("theme")))
-        audio.play("deny")
+        audio.play("ui.deny")
       end
     end,
   }
@@ -109,7 +104,7 @@ function settings.run(api)
       if i < 1 then i = #rows elseif i > #rows then i = 1 end
       if not rows[i].spacer then
         sel = i
-        audio.play("move")
+        audio.play("ui.move")
         return
       end
     end
@@ -134,6 +129,11 @@ function settings.run(api)
           local fg = on and gfx.contrast(colors.lightBlue) or colors.white
           gfx.fill(3, y, gfx.W - 4, 1, bg)
           gfx.text(4, y, row.label, fg, bg)
+          if row.bar then
+            -- the knob's own level, drawn behind the label
+            gfx.bar(gfx.W - 20, y, 10, row.bar(), on and gfx.contrast(colors.lightBlue) or colors.lime,
+              on and colors.lightBlue or colors.gray)
+          end
           if row.get then
             local value = row.get()
             gfx.right(gfx.W - 4, y, value, on and fg or colors.lime, bg)
@@ -171,20 +171,20 @@ function settings.run(api)
         step(1)
       elseif k == keys.left or k == keys.a then
         local row = rows[sel]
-        if row.cycle then row.cycle(-1) audio.play("move") end
+        if row.cycle then row.cycle(-1) audio.play("ui.move") end
       elseif k == keys.right or k == keys.d then
         local row = rows[sel]
-        if row.cycle then row.cycle(1) audio.play("move") end
+        if row.cycle then row.cycle(1) audio.play("ui.move") end
       elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
         local row = rows[sel]
         if row.action then
           row.action()
         elseif row.cycle then
           row.cycle(1)
-          audio.play("select")
+          audio.play("ui.select")
         end
       elseif k == keys.backspace or k == keys.q then
-        audio.play("back")
+        audio.play("ui.back")
         return 1
       end
     elseif name == "mouse_click" then
@@ -198,11 +198,11 @@ function settings.run(api)
           elseif row.cycle then
             -- clicking the left chevron steps back, anywhere else steps on
             row.cycle(mx == gfx.W - 5 - #row.get() and -1 or 1)
-            audio.play("select")
+            audio.play("ui.select")
           end
         else
           sel = i
-          audio.play("move")
+          audio.play("ui.move")
         end
       end
     end

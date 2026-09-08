@@ -77,7 +77,7 @@ function Game:press(x, y, silent)
   if not silent then
     self.moves = self.moves + 1
     self.totalMoves = self.totalMoves + 1
-    audio.play("blip", (x + y) % 8)
+    audio.play(self.board[self:index(x, y)] and "lo.on" or "lo.off")
   end
 end
 
@@ -117,7 +117,7 @@ function Game:activate()
     local bonus = max(0, self.par * 2 - self.moves) * 15
     self.score = self.score + 200 + self.round * 50 + bonus
     self.flash = 0.6
-    audio.play("levelup")
+    audio.play("lo.solved")
     self:deal()
   end
 end
@@ -154,7 +154,7 @@ function Game:update(dt)
   if self.time >= self.limit then
     self.finished = true
     self.won = self.round > 3
-    audio.play("gameover")
+    audio.play("result.lose")
   end
 end
 
@@ -229,6 +229,7 @@ return {
   accent = colors.yellow,
   order = 110,
   cover = cover,
+  music = "quiet",
   controls = {
     { "Arrows / WASD", "Move cursor" },
     { "Space", "Press a light" },

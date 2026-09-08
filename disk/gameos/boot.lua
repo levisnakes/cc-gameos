@@ -67,9 +67,9 @@ local finished, bootErr = pcall(function()
   data.load()
   gfx.applyTheme(gfx.themeByID(data.get("theme")))
   audio.init()
-  audio.sfxOn = data.get("sfx")
-  audio.musicOn = data.get("music")
-  audio.volume = data.get("volume")
+  audio.volumes.master = data.get("volMaster") / 10
+  audio.volumes.music = data.get("volMusic") / 10
+  audio.volumes.sfx = data.get("volSfx") / 10
 
   -------------------------------------------------------- game catalogue
   local games, broken = {}, {}

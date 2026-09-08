@@ -295,11 +295,11 @@ do
 
   -- an unexpected value type is ignored rather than adopted
   handle = fs.open("/gameos/data/save.dat", "w")
-  handle.write('{ settings = { sfx = "yes", volume = 2 } }')
+  handle.write('{ settings = { volMaster = "loud", volMusic = 3 } }')
   handle.close()
   data.load()
-  eq(data.get("sfx"), true, "wrongly typed setting falls back")
-  eq(data.get("volume"), 2, "correctly typed setting is kept")
+  eq(data.get("volMaster"), 7, "wrongly typed setting falls back to the default")
+  eq(data.get("volMusic"), 3, "correctly typed setting is kept")
   fs.delete("/gameos/data/save.dat")
   data.load()
 end

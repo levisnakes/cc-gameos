@@ -39,20 +39,20 @@ local function crash(def, err)
     lines[#lines + 1] = msg:sub(1, width)
     msg = msg:sub(width + 1)
   end
-  audio.play("deny")
+  audio.play("ui.deny")
   ui.alert(" " .. def.name .. " crashed ", lines, colors.red)
   return "menu"
 end
 
 --------------------------------------------------------------- pause screen
 local function pauseMenu(def, api)
-  audio.play("back")
+  audio.play("ui.back")
   while true do
     local items = {
       { label = "Resume" },
       { label = "Restart" },
       { label = "Controls" },
-      { label = "Sound", hint = audio.sfxOn and "on" or "off" },
+      { label = "Volume", hint = math.floor(audio.volumes.master * 10) .. "/10" },
       { label = "Quit to menu" },
     }
     local pick = ui.picker({
@@ -67,9 +67,12 @@ local function pauseMenu(def, api)
     if pick == 3 then
       ui.controls(def)
     elseif pick == 4 then
-      audio.sfxOn = not audio.sfxOn
-      data.set("sfx", audio.sfxOn)
-      audio.play("select")
+      -- step the master knob down and wrap, so it is adjustable mid-game
+      local step = math.floor(audio.volumes.master * 10 + 0.5) - 2
+      if step < 0 then step = 10 end
+      audio.volumes.master = step / 10
+      data.set("volMaster", step)
+      audio.play("ui.select")
     elseif pick == 5 then
       return "quit"
     end
@@ -212,18 +215,18 @@ local function gameOverCard(def, inst, rank, best, trophies)
       local k = ev[2]
       if k == keys.left or k == keys.a then
         sel = sel > 1 and sel - 1 or #buttons
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.right or k == keys.d or k == keys.tab then
         sel = sel < #buttons and sel + 1 or 1
-        audio.play("move")
+        audio.play("ui.move")
       elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
-        audio.play("select")
+        audio.play("ui.select")
         return sel
       elseif k == keys.r then
-        audio.play("select")
+        audio.play("ui.select")
         return 1
       elseif k == keys.backspace or k == keys.q then
-        audio.play("back")
+        audio.play("ui.back")
         return 2
       end
     elseif name == "mouse_click" then
@@ -231,7 +234,7 @@ local function gameOverCard(def, inst, rank, best, trophies)
       for i = 1, #rects do
         local r = rects[i]
         if my == r.y and mx >= r.x and mx < r.x + r.w then
-          audio.play("select")
+          audio.play("ui.select")
           return i
         end
       end
@@ -271,8 +274,9 @@ local function session(def, api, mode)
   end
 
   input.reset()
-  audio.stopMusic()
-  audio.play("start")
+  -- Simon asks you to listen, so it is the one game that runs in silence
+  if def.music then audio.playMusic(def.music) else audio.stopMusic() end
+  audio.play("ui.launch")
 
   local startClock = os.clock()
   local last = startClock
@@ -392,8 +396,8 @@ local function session(def, api, mode)
   end
   local best = data.best(def.id)
 
-  audio.play(inst.won and "win" or "gameover")
-  if #trophies > 0 then audio.play("powerup") end
+  audio.play(inst.won and "result.win" or "result.lose")
+  if #trophies > 0 then audio.play("ui.trophy") end
 
   -- a new number one earns the arcade name entry
   if rank == 1 and (inst.score or 0) > 0 then
