@@ -10,7 +10,7 @@ local gfx = req("lib.gfx")
 local audio = req("lib.audio")
 local data = req("lib.data")
 
-local floor = math.floor
+local floor, abs = math.floor, math.abs
 
 local Game = {}
 Game.__index = Game
@@ -355,10 +355,81 @@ function Game:onKey(code, held)
   elseif code == keys.r and not held then
     self:restart()
   end
+  self.path = nil          -- any key press cancels a queued walk
+end
+
+--- Click a square to walk there. A neighbouring square is just a step, so
+--- pushing still works by clicking the box you want to shove; anywhere else
+--- is a shortest path through free squares, which is how every Sokoban with
+--- a mouse has worked and saves a great deal of tapping.
+function Game:walkTo(tx, ty)
+  local startK = self:key(self.px, self.py)
+  local goalK = self:key(tx, ty)
+  if startK == goalK then return end
+  if self.walls[goalK] or self.boxes[goalK] then return end
+
+  local came, queue, head = { [startK] = false }, { { self.px, self.py } }, 1
+  while head <= #queue do
+    local node = queue[head]; head = head + 1
+    local cx, cy = node[1], node[2]
+    if cx == tx and cy == ty then break end
+    for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+      local nx, ny = cx + d[1], cy + d[2]
+      if nx >= 1 and nx <= self.w and ny >= 1 and ny <= self.h then
+        local k = self:key(nx, ny)
+        if came[k] == nil and not self.walls[k] and not self.boxes[k] then
+          came[k] = { cx, cy, d[1], d[2] }
+          queue[#queue + 1] = { nx, ny }
+        end
+      end
+    end
+  end
+
+  if came[goalK] == nil then return end            -- walled off
+  local path, cx, cy = {}, tx, ty
+  while true do
+    local from = came[self:key(cx, cy)]
+    if not from then break end
+    table.insert(path, 1, { from[3], from[4] })
+    cx, cy = from[1], from[2]
+  end
+  self.path = path
+  self.pathAt = 0
+end
+
+function Game:onMouse(kind, btn, x, y)
+  if self.finished or kind ~= "mouse_click" then return end
+  local gx = floor((x - self.ox) / self.cw) + 1
+  local gy = floor((y - self.oy) / self.ch) + 1
+  if gx < 1 or gx > self.w or gy < 1 or gy > self.h then return end
+
+  local dx, dy = gx - self.px, gy - self.py
+  if (dx == 0 and abs(dy) == 1) or (dy == 0 and abs(dx) == 1) then
+    self.path = nil
+    self:step(dx, dy)
+  else
+    self:walkTo(gx, gy)
+  end
 end
 
 function Game:update(dt)
   if self.flash > 0 then self.flash = self.flash - dt end
+
+  -- drain a queued walk one square at a time, so it reads as walking rather
+  -- than teleporting and each footstep still gets its sound
+  if self.path then
+    self.pathAt = self.pathAt + dt
+    while self.path and self.pathAt > 0.055 do
+      self.pathAt = self.pathAt - 0.055
+      local move = table.remove(self.path, 1)
+      if not move then
+        self.path = nil
+      else
+        self:step(move[1], move[2])
+        if #self.path == 0 then self.path = nil end
+      end
+    end
+  end
 end
 
 ---------------------------------------------------------------------- draw
@@ -499,6 +570,7 @@ return {
     { "Arrows / WASD", "Walk / push" },
     { "U", "Undo" },
     { "R", "Restart level" },
+    { "Mouse", "Click a square to walk there" },
     { "P", "Pause menu" },
   },
   configure = configure,

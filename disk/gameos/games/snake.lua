@@ -16,7 +16,7 @@ local OX, OY = 4, 4
 local Game = {}
 Game.__index = Game
 
-local floor = math.floor
+local floor, abs = math.floor, math.abs
 
 ------------------------------------------------------------------ helpers
 local function key(x, y) return (y - 1) * COLS + x end
@@ -135,6 +135,26 @@ function Game:onKey(code, held)
   elseif code == keys.down or code == keys.s then self:turn("down")
   elseif code == keys.left or code == keys.a then self:turn("left")
   elseif code == keys.right or code == keys.d then self:turn("right")
+  end
+end
+
+--- Steering by pointer: a click turns the snake toward wherever you clicked,
+--- along whichever axis it is furthest away on. It cannot be as precise as
+--- the keys on a tight lattice, but it makes the game playable with a mouse.
+function Game:onMouse(kind, btn, x, y)
+  if kind ~= "mouse_click" and kind ~= "mouse_drag" then return end
+  local h = self.body[self.head]
+  if not h then return end
+  local gx = floor(((x - 1) * 2 + 1 - OX) / CELL) + 1
+  local gy = floor(((y - 1) * 3 + 1 - OY) / CELL) + 1
+  local dx, dy = gx - h.x, gy - h.y
+  if dx == 0 and dy == 0 then return end
+  -- turn along the axis with the greater gap; ties keep the current heading's
+  -- perpendicular so a click never asks for an impossible reversal
+  if abs(dx) > abs(dy) then
+    self:turn(dx > 0 and "right" or "left")
+  else
+    self:turn(dy > 0 and "down" or "up")
   end
 end
 
@@ -354,6 +374,48 @@ local function cover(c, t)
 end
 
 ----------------------------------------------------------------- definition
+--- Attract-mode bot. Steers toward the food on whichever axis is free,
+--- preferring a turn that does not immediately run into its own body. It is
+--- not a solver -- it will eventually trap itself, which is fine, because a
+--- demo that dies now and then looks like someone playing.
+local function demo(self, frame)
+  if self.finished or self.dying > 0 or not self.food then return end
+  if frame % 2 ~= 0 then return end
+  local h = self.body[self.head]
+  if not h then return end
+
+  local function blocked(dx, dy)
+    local nx, ny = h.x + dx, h.y + dy
+    if self.mode ~= "wrap" and (nx < 1 or nx > COLS or ny < 1 or ny > ROWS) then
+      return true
+    end
+    for i = 1, #self.body do
+      local seg = self.body[i]
+      if seg and seg.x == nx and seg.y == ny then return true end
+    end
+    return false
+  end
+
+  local wants = {}
+  if self.food.x < h.x then wants[#wants + 1] = { "left", -1, 0 }
+  elseif self.food.x > h.x then wants[#wants + 1] = { "right", 1, 0 } end
+  if self.food.y < h.y then wants[#wants + 1] = { "up", 0, -1 }
+  elseif self.food.y > h.y then wants[#wants + 1] = { "down", 0, 1 } end
+  -- anything at all, if the preferred ways are walled off
+  wants[#wants + 1] = { "left", -1, 0 }
+  wants[#wants + 1] = { "right", 1, 0 }
+  wants[#wants + 1] = { "up", 0, -1 }
+  wants[#wants + 1] = { "down", 0, 1 }
+
+  for i = 1, #wants do
+    local w = wants[i]
+    if not blocked(w[2], w[3]) then
+      self:turn(w[1])
+      return
+    end
+  end
+end
+
 return {
   id = "snake",
   name = "Snake",
@@ -364,6 +426,7 @@ return {
   music = "serpentine",
   controls = {
     { "Arrows/WASD", "Turn" },
+    { "Mouse", "Click to steer" },
     { "P", "Pause menu" },
   },
   modes = {
@@ -379,5 +442,6 @@ return {
     { id = "snake_long", name = "Long Boy", desc = "Grow to 40 segments",
       test = function(g) return g:length() >= 40 end },
   },
+  demo = demo,
   new = new,
 }

@@ -2,13 +2,14 @@
 
 A complete console that boots on a ComputerCraft (CC:Tweaked) Advanced
 Computer: animated launcher, thirteen finished games, high score tables with
-arcade initials, 43 trophies, four palette themes, sound, and a save file that
+arcade initials, 44 trophies, four palette themes, sound, and a save file that
 remembers everything.
 
 It is written against a **square-pixel framebuffer** built on ComputerCraft's
 2×3 sub-pixel drawing characters, so the display is effectively **102 × 57
 pixels** rather than 51 × 19 text cells. That is what lets Tetris have a real
-well, Meteors have real vector rocks, and Invaders have real sprites.
+well, Meteors have real vector rocks, and Bombard have terrain you can blow
+holes in.
 
 ![Boot screen](docs/boot.png)
 
@@ -16,7 +17,7 @@ well, Meteors have real vector rocks, and Invaders have real sprites.
 
 | | |
 |---|---|
-| ![Tetris](docs/tetris.png) | ![Invaders](docs/invaders.png) |
+| ![Tetris](docs/tetris.png) | ![Bombard](docs/bombard.png) |
 | ![Breakout](docs/breakout.png) | ![Meteors](docs/meteors.png) |
 | ![Minesweeper](docs/minesweeper.png) | ![2048](docs/2048.png) |
 | ![Flappy](docs/flappy.png) | ![Snake](docs/snake.png) |
@@ -121,7 +122,7 @@ To leave GameOS, pick **Power Off** from the menu, press **Q**, or hold
 | **Snake** | 32×16 board, bonus fruit, speed ramp | Classic / Wrap / Maze |
 | **Tetris** | Full modern ruleset: 7-bag, SRS kicks, hold, ghost, lock delay, T-spins, back-to-back, combos | Start at level 1 / 5 / 10 / 15 |
 | **Breakout** | 10 hand-built walls, multiball, lasers, 7 power-ups, 3 lives | Start at level 1 / 4 / 7 |
-| **Invaders** | 40 aliens, destructible shields, UFO, endless waves | Normal / Hard |
+| **Bombard** | Artillery duel over destructible terrain, with wind. Plays the computer, a friend on one keyboard, or **another ComputerCraft console over a modem** | CPU easy/normal/hard, same console, host, join |
 | **Minesweeper** | First-click safety, flood reveal, flags, chording | Beginner / Intermediate / Expert |
 | **2048** | Standard rules with one-step undo | — |
 | **Sokoban** | 12 levels, every one machine-verified solvable, optimal push counts shown as par, unlimited undo | Continue / Level select / Start over |
@@ -158,7 +159,7 @@ Shared across the console:
 - **Animated cover art.** Every game draws its own live illustration in the
   launcher: the snake slithers after an apple, tetrominoes fall, the asteroid
   rocks tumble.
-- **43 trophies** across the thirteen games plus three console-wide ones, with
+- **44 trophies** across the thirteen games plus three console-wide ones, with
   a browser that shows what you have and what is still out there. Earning one
   is announced on the game-over card.
 - **Arcade initials.** A new number one prompts for three letters, the way it

@@ -210,9 +210,10 @@ song("ricochet", {
   },
 })
 
---============================================================== Invaders
--- A slow, heavy descent. The formation is already a metronome, so this
--- stays out of the way and just adds dread.
+--============================================================== Bombard
+-- A slow, heavy descent: a duel where each turn lands harder than the last.
+-- The bass walks down under a held figure, so it builds without hurrying the
+-- player, who is doing arithmetic in their head between shots.
 song("descent", {
   title = "Descent",
   tempo = 4,

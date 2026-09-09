@@ -249,15 +249,44 @@ function Game:onKey(code, held)
   end
 end
 
+--- Two ways to play with a pointer: swipe across the board, or click toward
+--- an edge. The swipe is the natural gesture and takes priority; a click that
+--- goes nowhere falls back to the edge rule so a single tap still moves.
 function Game:onMouse(kind, btn, x, y)
-  if kind ~= "mouse_click" then return end
-  -- click a screen edge to slide that way
-  local cx, cy = gfx.W / 2, gfx.H / 2
-  local dx, dy = x - cx, y - cy
-  if math.abs(dx) * 0.4 > math.abs(dy) then
-    self:move(dx > 0 and "right" or "left")
-  else
-    self:move(dy > 0 and "down" or "up")
+  if kind == "mouse_click" then
+    self.dragFrom = { x, y }
+    self.dragged = false
+    return
+  end
+
+  if kind == "mouse_drag" and self.dragFrom then
+    local dx = x - self.dragFrom[1]
+    local dy = y - self.dragFrom[2]
+    -- characters are about twice as wide as they are tall, so horizontal
+    -- distance has to be scaled up before the two axes can be compared
+    local hx, hy = dx * 2, dy * 3
+    if not self.dragged and (hx * hx + hy * hy) >= 36 then
+      self.dragged = true
+      if math.abs(hx) > math.abs(hy) then
+        self:move(dx > 0 and "right" or "left")
+      else
+        self:move(dy > 0 and "down" or "up")
+      end
+    end
+    return
+  end
+
+  if kind == "mouse_up" then
+    local from = self.dragFrom
+    self.dragFrom = nil
+    if self.dragged or not from then return end
+    -- no swipe happened, so treat it as a click toward a screen edge
+    local dx, dy = from[1] - gfx.W / 2, from[2] - gfx.H / 2
+    if math.abs(dx) * 0.4 > math.abs(dy) then
+      self:move(dx > 0 and "right" or "left")
+    else
+      self:move(dy > 0 and "down" or "up")
+    end
   end
 end
 
@@ -382,6 +411,7 @@ return {
     { "Arrows / WASD", "Slide tiles" },
     { "U", "Undo one move" },
     { "Click", "Slide that way" },
+    { "Mouse", "Swipe or click an edge" },
     { "P", "Pause menu" },
   },
   trophies = {

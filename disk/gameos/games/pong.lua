@@ -71,6 +71,13 @@ end
 --------------------------------------------------------------------- input
 function Game:onKey(code, held) end
 
+--- Mouse aims the left paddle: its centre follows the pointer, which is a far
+--- more natural way to play Pong than tapping a direction key.
+function Game:onMouse(kind, btn, x, y)
+  if kind ~= "mouse_click" and kind ~= "mouse_drag" then return end
+  self.mouseY = (y - 1) * 3 + 1 - floor(PADDLE_H / 2)
+end
+
 -------------------------------------------------------------------- update
 function Game:movePaddle(y, dir, dt, speed)
   y = y + dir * speed * dt
@@ -141,7 +148,17 @@ function Game:update(dt)
   local ldir = 0
   if input.down(keys.w, keys.up) then ldir = ldir - 1 end
   if input.down(keys.s, keys.down) then ldir = ldir + 1 end
-  self.leftY = self:movePaddle(self.leftY, ldir, dt, pspeed)
+  if ldir ~= 0 then self.mouseY = nil end   -- a key press takes the paddle back
+  if self.mouseY then
+    -- ease toward the pointer rather than teleporting, so the paddle keeps a
+    -- speed limit and the ball can still be beaten past it
+    local delta = self.mouseY - self.leftY
+    local step = pspeed * 1.8 * dt
+    if delta > step then delta = step elseif delta < -step then delta = -step end
+    self.leftY = self:movePaddle(self.leftY + delta, 0, dt, pspeed)
+  else
+    self.leftY = self:movePaddle(self.leftY, ldir, dt, pspeed)
+  end
 
   if self.twoPlayer then
     local rdir = 0
@@ -287,6 +304,7 @@ return {
     { "W / S", "Left paddle" },
     { "Up / Down", "Left paddle" },
     { "I / K", "Right paddle (2P)" },
+    { "Mouse", "Move left paddle" },
     { "P", "Pause menu" },
   },
   modes = {

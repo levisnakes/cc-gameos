@@ -13,7 +13,7 @@ local input = req("lib.input")
 
 local floor = math.floor
 local sin, cos, pi = math.sin, math.cos, math.pi
-local sqrt = math.sqrt
+local sqrt, acos = math.sqrt, math.acos
 local max, min = math.max, math.min
 
 local W, H = 102, 57
@@ -150,6 +150,25 @@ function Game:onKey(code, held)
   end
 end
 
+--- The pointer is an aim target rather than a direct heading: the ship still
+--- turns at its own rate toward the cursor, so it keeps feeling like a ship
+--- with momentum instead of a turret that snaps. Left click fires, right
+--- click burns the engine for a short burst.
+function Game:onMouse(kind, btn, x, y)
+  if self.finished or self.dead then return end
+  if kind == "mouse_click" or kind == "mouse_drag" then
+    self.aimX = (x - 1) * 2 + 1
+    self.aimY = (y - 1) * 3 + 1
+    if kind == "mouse_click" then
+      if btn == 2 then
+        self.thrustBurst = 0.4
+      else
+        self:fire()
+      end
+    end
+  end
+end
+
 -------------------------------------------------------------------- update
 function Game:hitShip()
   if self.invuln > 0 or self.dead then return end
@@ -198,9 +217,38 @@ function Game:update(dt)
   else
     self.invuln = max(0, self.invuln - dt)
     local s = self.ship
-    if input.down(keys.left, keys.a) then s.angle = s.angle - 3.4 * dt end
-    if input.down(keys.right, keys.d) then s.angle = s.angle + 3.4 * dt end
-    s.thrust = input.down(keys.up, keys.w)
+    local turning = false
+    if input.down(keys.left, keys.a) then
+      s.angle = s.angle - 3.4 * dt
+      turning = true
+    end
+    if input.down(keys.right, keys.d) then
+      s.angle = s.angle + 3.4 * dt
+      turning = true
+    end
+    if turning then self.aimX = nil end     -- keys take the helm back
+    if self.aimX then
+      -- Shortest way round to the cursor, capped at the ship's turn rate.
+      -- There is no portable atan2 here (5.2 has no two-argument atan, 5.4
+      -- has no atan2), so the turn comes from the forward vector directly:
+      -- the dot product gives how far round the target is, the cross product
+      -- gives which way.
+      local dx, dy = self.aimX - s.x, self.aimY - s.y
+      local len = sqrt(dx * dx + dy * dy)
+      if len > 1 then
+        dx, dy = dx / len, dy / len
+        local fx, fy = cos(s.angle), sin(s.angle)
+        local dot = fx * dx + fy * dy
+        if dot > 1 then dot = 1 elseif dot < -1 then dot = -1 end
+        local diff = acos(dot)
+        if fx * dy - fy * dx < 0 then diff = -diff end
+        local step = 3.4 * dt
+        if diff > step then diff = step elseif diff < -step then diff = -step end
+        s.angle = s.angle + diff
+      end
+    end
+    self.thrustBurst = max(0, (self.thrustBurst or 0) - dt)
+    s.thrust = input.down(keys.up, keys.w) or self.thrustBurst > 0
     if s.thrust then
       s.vx = s.vx + cos(s.angle) * 62 * dt
       s.vy = s.vy + sin(s.angle) * 62 * dt
@@ -476,6 +524,8 @@ return {
     { "Up", "Thrust" },
     { "Space", "Fire" },
     { "H or Down", "Hyperspace" },
+    { "Mouse", "Aim, click to fire" },
+    { "Right click", "Thrust burst" },
     { "P", "Pause menu" },
   },
   trophies = {

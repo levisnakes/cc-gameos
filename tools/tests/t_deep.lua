@@ -158,27 +158,36 @@ do
   check(b.levelIndex > 1 or b.finished, "the bot advanced a level or lost fairly")
 end
 
------------------------------------------------------------------ invaders
+------------------------------------------------------------------ bombard
 do
-  local def, v = make("invaders", 1)
-  local frames = play("invaders", v, 6000, function(inst, f)
-    -- chase the lowest surviving alien, firing constantly
-    local target = nil
-    for i = 1, #inst.aliens do
-      local a = inst.aliens[i]
-      if a.alive and (not target or a.y > target.y) then target = a end
+  -- A long session against the computer, played by a bot that ranges in the
+  -- way a person does: walk the aim toward where the last shot landed.
+  -- A fixed seed, because the point of this run is the bot's ranging and not
+  -- the luck of the map: on a random hill a "did it hit?" check passes or
+  -- fails for reasons that have nothing to do with the code.
+  local def = req("games.bombard")
+  local v = def.new(api, { id = "normal", cpu = "normal", tries = 30,
+                           error = 8, seed = 4242 })
+  local frames = play("bombard", v, 6000, function(inst)
+    if inst.phase ~= "aim" or inst.turn ~= 1 then return end
+    local t, foe = inst.tanks[1], inst.tanks[2]
+    local aim = inst.botAim or { a = 50, p = 58 }
+    local last = inst.lastShot and inst.lastShot[1]
+    if last then
+      -- falling short of the target means more power, long means less
+      local err = last.x - foe.x
+      aim.p = math.max(10, math.min(100, aim.p - err * 0.4))
     end
-    if target then
-      hold(keys.left, target.x + 4 < inst.playerX + 4)
-      hold(keys.right, target.x + 4 > inst.playerX + 4)
-    end
-    if f % 6 == 0 then tap(inst, keys.space) end
+    inst.botAim = aim
+    inst:fire(aim.a, aim.p)
   end)
-  LOG(string.format("  invaders: %d frames, wave %d, %d kills, score %d",
-    frames, v.wave, v.kills, v.score))
-  check(v.kills > 20, "the invaders bot shot aliens")
-  hold(keys.left, false)
-  hold(keys.right, false)
+  LOG(string.format("  bombard: %d frames, round %d, %d/%d on target, winner %s",
+    frames, v.round, v.hits[1], v.shots[1], tostring(v.winner)))
+  check(v.shots[1] > 1, "the bombard bot took shots")
+  check(v.finished, "the bombard match ended")
+  -- A bot that walks its aim toward the last impact should get on target, so
+  -- this is really a check that ranging in works at all.
+  check(v.hits[1] > 0, "a ranging player can hit back")
 end
 
 -------------------------------------------------------------------- snake

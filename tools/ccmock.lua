@@ -267,6 +267,9 @@ M.hooks = {}
 M.eventBudget = 2000000
 
 function M.now() return vclock end
+--- Push the virtual clock forward, for tests that need to watch a timeout
+--- expire without queueing hundreds of timer events.
+function M.advance(seconds) vclock = vclock + seconds end
 function M.push(...) queue[#queue + 1] = { ... } end
 
 os = os or {}
@@ -275,6 +278,9 @@ function os.time() return (vclock / 60) % 24 end
 function os.day() return math.floor(vclock / 1440) end
 function os.epoch() return 1735689600000 + math.floor(vclock * 1000) end
 function os.getComputerID() return 7 end
+M.label = "Workshop"
+function os.getComputerLabel() return M.label end
+function os.setComputerLabel(v) M.label = v end
 function os.getComputerLabel() return "GAMEOS" end
 function os.setComputerLabel() end
 function os.startTimer(t)
@@ -471,12 +477,80 @@ local speaker = {
   playSound = function() return true end,
   stop = function() end,
 }
+----------------------------------------------------------------------- modem
+-- A modem plus a virtual ether, so console-to-console play can be tested
+-- without a second Lua state. Anything transmitted lands in M.ether as a
+-- record, and M.deliver() turns a record into the modem_message event the
+-- receiving side would actually see. A test can therefore play the part of
+-- the other console: read what we sent, and answer.
+M.modemPresent = true
+M.ether = {}                 -- every transmit, in order
+M.openChannels = {}
+
+local modem = {
+  isWireless = function() return true end,
+  open = function(ch)
+    if type(ch) ~= "number" or ch < 0 or ch > 65535 then
+      error("Expected number in range 0-65535", 2)
+    end
+    M.openChannels[ch] = true
+  end,
+  close = function(ch) M.openChannels[ch] = nil end,
+  isOpen = function(ch) return M.openChannels[ch] == true end,
+  closeAll = function() M.openChannels = {} end,
+  transmit = function(ch, reply, body)
+    if type(ch) ~= "number" or type(reply) ~= "number" then
+      error("Expected number, number, message", 2)
+    end
+    M.ether[#M.ether + 1] = { channel = ch, reply = reply, body = body, t = vclock }
+    return true
+  end,
+}
+
+--- Queue the modem_message event a transmit on `channel` would produce here.
+--- Delivery is not automatic: the ether is one-way by design, so a test says
+--- explicitly what the far console sent back.
+function M.deliver(channel, reply, body, distance)
+  M.push("modem_message", "back", channel, reply, body, distance or 12)
+end
+
+--- The most recent thing we transmitted, optionally filtered by message type.
+function M.lastSent(kind)
+  for i = #M.ether, 1, -1 do
+    local rec = M.ether[i]
+    if not kind or (type(rec.body) == "table" and rec.body.t == kind) then return rec end
+  end
+  return nil
+end
+
+function M.clearEther() M.ether = {} end
+
+local function sideType(side)
+  if M.speakerPresent and side == "left" then return "speaker" end
+  if M.modemPresent and side == "back" then return "modem" end
+  return nil
+end
+
 peripheral = {}
-function peripheral.find(kind) if kind == "speaker" and M.speakerPresent then return speaker end return nil end
-function peripheral.getNames() return M.speakerPresent and { "left" } or {} end
-function peripheral.isPresent(side) return M.speakerPresent and side == "left" end
-function peripheral.getType(side) return (M.speakerPresent and side == "left") and "speaker" or nil end
-function peripheral.wrap(side) return (M.speakerPresent and side == "left") and speaker or nil end
+function peripheral.find(kind)
+  if kind == "speaker" and M.speakerPresent then return speaker end
+  if kind == "modem" and M.modemPresent then return modem end
+  return nil
+end
+function peripheral.getNames()
+  local out = {}
+  if M.speakerPresent then out[#out + 1] = "left" end
+  if M.modemPresent then out[#out + 1] = "back" end
+  return out
+end
+function peripheral.isPresent(side) return sideType(side) ~= nil end
+function peripheral.getType(side) return sideType(side) end
+function peripheral.wrap(side)
+  local kind = sideType(side)
+  if kind == "speaker" then return speaker end
+  if kind == "modem" then return modem end
+  return nil
+end
 
 -------------------------------------------------------------------- parallel
 parallel = {}

@@ -1,6 +1,6 @@
 --[[ GameOS installer -- the whole console in one file.
 
-  This writes 33 files and then you are done. Nothing is downloaded, so
+  This writes 34 files and then you are done. Nothing is downloaded, so
   it works on a computer with HTTP disabled.
 
     install            unpack into this computer
@@ -223,6 +223,1240 @@ else
   term.setTextColour(colors.white)
   print("GameOS " .. VERSION .. " -- thanks for playing.")
 end
+]=])
+file("gameos/games/bombard.lua", [=[
+--[[ Bombard -- two guns, one hill, and whatever is left of it.
+
+  Replaces Invaders as the console's shooter, and is built the other way
+  round: for two people rather than one. It plays against the computer, across
+  one keyboard, or between two ComputerCraft consoles over a modem.
+
+  Why a turn-based artillery duel is the right shape for network play. A
+  real-time game across rednet needs the two consoles to agree on the world
+  twenty times a second, and any hiccup shows as a rubber-banding tank. Here
+  the entire turn is two numbers -- angle and power -- so the only thing that
+  ever crosses the wire is a handful of bytes, and a shot that arrives late is
+  simply a shot that arrives late.
+
+  That works because both consoles run the same simulation and get the same
+  answer. Three things make that true:
+
+    * the terrain comes from a seed the host sends, grown by a small
+      hand-rolled generator rather than math.random, so nothing else drawing
+      random numbers can shift it;
+    * each turn's wind comes from a shared stream advanced in lockstep;
+    * a shot is simulated to completion the moment it is fired, producing a
+      fixed path, and the flight animation merely walks that path. Two
+      consoles running at different frame rates therefore still agree on
+      exactly where the shell landed.
+
+  The host also sends a checksum after each shot. If the two worlds have
+  drifted at all, the guest asks for the whole state and takes the host's
+  word for it, so a desync is a half-second hiccup rather than two people
+  playing different games.
+]]
+
+local req = ...
+local gfx = req("lib.gfx")
+local Canvas = req("lib.canvas")
+local audio = req("lib.audio")
+local input = req("lib.input")
+local net = req("lib.net")
+
+local floor, ceil = math.floor, math.ceil
+local min, max, abs = math.min, math.max, math.abs
+local sin, cos, sqrt, pi = math.sin, math.cos, math.sqrt, math.pi
+
+-- The play area is its own canvas sitting under the one-row header, so all
+-- world coordinates below are canvas pixels: 102 wide, 54 tall, y growing
+-- downward. Nothing here has to know where the header is.
+local FIELD_W = 102
+local SKY_TOP = 1
+local GROUND_BOTTOM = 54
+
+local GRAVITY = 46
+local MAX_WIND = 10
+local BLAST_R = 10                -- damage radius
+local CRATER_R = 8
+local MAX_DAMAGE = 40
+local START_HEALTH = 100
+
+local P1, P2 = 1, 2
+
+local Game = {}
+Game.__index = Game
+
+--------------------------------------------------------------- shared random
+--- A Lehmer generator, written out rather than borrowed from math.random so
+--- that both consoles produce identical terrain and identical wind. The
+--- multiply stays exact in a double (2147483646 * 16807 is far below 2^53).
+local function stream(seed)
+  local s = seed % 2147483647
+  if s <= 0 then s = s + 2147483646 end
+  return function()
+    s = (s * 16807) % 2147483647
+    return s / 2147483647
+  end
+end
+
+------------------------------------------------------------------- terrain
+--- Solid ground is a bitmap rather than a heightline, so a shell can bite
+--- into the side of a hill and leave an overhang instead of politely
+--- lowering the surface.
+local function key(x, y) return (y - 1) * FIELD_W + x end
+
+local function makeTerrain(seed)
+  local rnd = stream(seed)
+  local a1, p1 = 4 + rnd() * 5, rnd() * pi * 2
+  local a2, p2 = 2 + rnd() * 3, rnd() * pi * 2
+  local a3, p3 = 1 + rnd() * 2, rnd() * pi * 2
+  local base = 33 + rnd() * 7
+
+  local surface = {}
+  for x = 1, FIELD_W do
+    local t = (x - 1) / FIELD_W * pi * 2
+    local y = base
+      - a1 * sin(t * 1.0 + p1)
+      - a2 * sin(t * 2.3 + p2)
+      - a3 * sin(t * 4.7 + p3)
+    y = floor(y + 0.5)
+    if y < SKY_TOP + 12 then y = SKY_TOP + 12 end
+    if y > GROUND_BOTTOM - 5 then y = GROUND_BOTTOM - 5 end
+    surface[x] = y
+  end
+
+  local solid = {}
+  for x = 1, FIELD_W do
+    for y = surface[x], GROUND_BOTTOM do solid[key(x, y)] = true end
+  end
+  return solid, surface
+end
+
+--- Terrain is redrawn every frame but only changes when something explodes,
+--- so it is kept as a list of vertical runs and rebuilt on damage instead.
+function Game:rebuildRuns()
+  local runs = {}
+  local solid = self.solid
+  for x = 1, FIELD_W do
+    local y = SKY_TOP
+    while y <= GROUND_BOTTOM do
+      if solid[key(x, y)] then
+        local start = y
+        while y <= GROUND_BOTTOM and solid[key(x, y)] do y = y + 1 end
+        runs[#runs + 1] = { x, start, y - start }
+      else
+        y = y + 1
+      end
+    end
+  end
+  self.runs = runs
+end
+
+function Game:surfaceAt(x)
+  if x < 1 or x > FIELD_W then return GROUND_BOTTOM end
+  for y = SKY_TOP, GROUND_BOTTOM do
+    if self.solid[key(x, y)] then return y end
+  end
+  return GROUND_BOTTOM + 1
+end
+
+function Game:carve(cx, cy, r)
+  local r2 = r * r
+  for y = max(SKY_TOP, floor(cy - r)), min(GROUND_BOTTOM, ceil(cy + r)) do
+    for x = max(1, floor(cx - r)), min(FIELD_W, ceil(cx + r)) do
+      local dx, dy = x - cx, y - cy
+      if dx * dx + dy * dy <= r2 then self.solid[key(x, y)] = nil end
+    end
+  end
+  self:rebuildRuns()
+end
+
+------------------------------------------------------------------- ballistics
+--- A shot is simulated to the end the instant it is fired. The result is a
+--- fixed path, which is what makes two consoles agree; the flight you watch
+--- is just a marker walking along it.
+function Game:simulate(fromX, fromY, angleDeg, power, wind)
+  local a = angleDeg * pi / 180
+  local speed = 18 + power * 0.52
+  local vx, vy = cos(a) * speed, -sin(a) * speed
+  local x, y = fromX, fromY
+  local dt = 0.02
+  local path = { { x, y } }
+
+  for _ = 1, 900 do
+    vx = vx + wind * dt
+    vy = vy + GRAVITY * dt
+    x = x + vx * dt
+    y = y + vy * dt
+    path[#path + 1] = { x, y }
+
+    if y >= SKY_TOP then
+      local ix, iy = floor(x + 0.5), floor(y + 0.5)
+      -- a tank is hit before the ground under it is
+      for p = P1, P2 do
+        local t = self.tanks[p]
+        if t.health > 0 and abs(ix - t.x) <= 3 and abs(iy - t.y) <= 3 then
+          return path, { x = x, y = y, hit = p }
+        end
+      end
+      if ix >= 1 and ix <= FIELD_W and iy >= SKY_TOP and self.solid[key(ix, iy)] then
+        return path, { x = x, y = y, ground = true }
+      end
+      if iy > GROUND_BOTTOM then
+        return path, { x = x, y = y, ground = true }
+      end
+    end
+    -- Off the sides is a miss, but only once it is also falling: a high shot
+    -- into the wind can leave the field and be blown back in.
+    if (x < -40 or x > FIELD_W + 40) and vy > 0 then
+      return path, { x = x, y = y, off = true }
+    end
+  end
+  return path, { x = x, y = y, off = true }
+end
+
+--------------------------------------------------------------------- damage
+function Game:applyBlast(ix, iy)
+  local dealt = 0
+  for p = P1, P2 do
+    local t = self.tanks[p]
+    if t.health > 0 then
+      local dx, dy = t.x - ix, t.y - iy
+      local d = sqrt(dx * dx + dy * dy)
+      if d <= BLAST_R then
+        local hurt = floor(MAX_DAMAGE * (1 - d / BLAST_R) + 0.5)
+        if hurt > 0 then
+          t.health = max(0, t.health - hurt)
+          dealt = dealt + hurt
+          t.flash = 0.5
+        end
+      end
+    end
+  end
+  self:carve(ix, iy, CRATER_R)
+
+  -- A tank whose ground was blown out drops onto whatever is left, and takes
+  -- damage for the drop. It does not die outright: an earlier version treated
+  -- reaching the floor as fatal, which meant a shell landing on the far side
+  -- of the map could kill you several turns after it had dug you a hole. Fall
+  -- damage keeps digging someone out a real tactic without that unfairness.
+  for p = P1, P2 do
+    local t = self.tanks[p]
+    if t.health > 0 then
+      local ground = min(self:surfaceAt(floor(t.x + 0.5)) - 1, GROUND_BOTTOM - 1)
+      if ground > t.y then
+        local fell = ground - t.y
+        t.y = ground
+        if fell > 3 then
+          local hurt = min(25, floor((fell - 3) * 2))
+          t.health = max(0, t.health - hurt)
+          t.flash = 0.5
+          dealt = dealt + hurt
+        end
+      end
+    end
+  end
+  return dealt
+end
+
+function Game:boom(x, y, big)
+  local n = big and 22 or 12
+  for _ = 1, n do
+    local a = math.random() * pi * 2
+    local sp = 8 + math.random() * (big and 34 or 20)
+    self.particles[#self.particles + 1] = {
+      x = x, y = y,
+      vx = cos(a) * sp, vy = sin(a) * sp - 8,
+      life = 0.3 + math.random() * 0.45,
+      colour = (math.random(1, 3) == 1) and colors.yellow or colors.orange,
+    }
+  end
+end
+
+---------------------------------------------------------------------- setup
+local function placeTanks(self)
+  -- far enough apart that neither can simply lob one straight over
+  local x1 = 9 + floor(stream(self.seed + 77)() * 8)
+  local x2 = FIELD_W - 8 - floor(stream(self.seed + 991)() * 8)
+  self.tanks = {
+    [P1] = { x = x1, y = self:surfaceAt(x1) - 1, health = START_HEALTH,
+             angle = 45, power = 55, colour = colors.lightBlue, side = 1, flash = 0 },
+    [P2] = { x = x2, y = self:surfaceAt(x2) - 1, health = START_HEALTH,
+             angle = 135, power = 55, colour = colors.red, side = -1, flash = 0 },
+  }
+end
+
+local function new(api, mode)
+  local self = setmetatable({}, Game)
+  mode = mode or {}
+
+  -- rows 2..19 of the terminal, which is exactly 102 x 54 pixels
+  self.c = Canvas.new(1, 2, gfx.W, gfx.H - 1, colors.black)
+  self.seed = mode.seed or math.random(1, 1000000)
+  self.solid, self.surface = makeTerrain(self.seed)
+  self:rebuildRuns()
+  placeTanks(self)
+
+  self.windStream = stream(self.seed + 5150)
+  self.particles = {}
+  self.tracer = nil
+  self.shot = nil
+  self.turn = P1
+  self.phase = "aim"                -- aim | flight | settle | over
+  self.settle = 0
+  self.score = 0
+  self.finished = false
+  self.shots = { [P1] = 0, [P2] = 0 }
+  self.hits = { [P1] = 0, [P2] = 0 }        -- any damage dealt
+  self.direct = { [P1] = 0, [P2] = 0 }      -- shell actually struck the tank
+  self.round = 1
+  self.message = nil
+  self.messageTime = 0
+
+  -- who is who
+  self.link = mode.link
+  self.role = mode.role                          -- "host" | "guest" | nil
+  self.twoPlayer = mode.twoPlayer or self.link ~= nil
+  if self.twoPlayer then
+    self.cpu = nil
+  else
+    self.cpu = mode.cpu or "normal"
+  end
+  self.cpuTries = mode.tries or 40
+  self.cpuError = mode.error or 6
+
+  if self.link then
+    -- The host is player one and moves first; that is the only thing the two
+    -- consoles have to agree on beyond the seed.
+    self.me = (self.role == "host") and P1 or P2
+    self.suppressPause = true                    -- see runtime: keeps the link alive
+    self.peerName = mode.peerName or self.link.name
+  else
+    self.me = nil                                -- local play: both are ours
+  end
+
+  self:newWind()
+  self.overlay = false
+  self.desyncs = 0
+  return self
+end
+
+function Game:newWind()
+  self.wind = floor((self.windStream() * 2 - 1) * MAX_WIND + 0.5)
+end
+
+------------------------------------------------------------------ whose turn
+--- True when this console drives the gun right now. Locally that is always
+--- so; on a network it is only our own half of the match.
+function Game:myTurn()
+  if self.phase ~= "aim" or self.finished then return false end
+  if not self.link then return true end
+  return self.turn == self.me
+end
+
+function Game:current() return self.tanks[self.turn] end
+
+----------------------------------------------------------------------- fire
+function Game:fire(angle, power, remote)
+  if self.phase ~= "aim" or self.finished then return end
+  local t = self:current()
+  t.angle, t.power = angle, power
+  self.shots[self.turn] = self.shots[self.turn] + 1
+
+  local path, impact = self:simulate(t.x + t.side * 4, t.y - 3, angle, power, self.wind)
+  self.shot = { path = path, impact = impact, at = 1, by = self.turn }
+  self.phase = "flight"
+  audio.play("bmb.fire")
+
+  -- our own shots go out to the other console; a shot that arrived from
+  -- there must not be echoed back
+  if self.link and not remote then
+    self.link:send("shot", { a = angle, p = power })
+  end
+end
+
+function Game:resolveImpact()
+  local imp = self.shot.impact
+  local ix, iy = floor(imp.x + 0.5), floor(imp.y + 0.5)
+  self.tracer = self.shot.path
+  -- Where the last shell went. Kept per player as well as overall, because
+  -- by the time your turn comes round again the most recent impact is your
+  -- opponent's, and it is your own last shot you want to correct from.
+  local where = { x = imp.x, y = imp.y, by = self.shot.by }
+  self.lastImpact = where
+  self.lastShot = self.lastShot or {}
+  self.lastShot[self.shot.by] = where
+
+  if imp.off then
+    audio.play("bmb.miss")
+    self:flash("OFF THE FIELD")
+  else
+    local dealt = self:applyBlast(ix, iy)
+    self:boom(imp.x, imp.y, dealt > 0)
+    if dealt > 0 then
+      self.hits[self.shot.by] = self.hits[self.shot.by] + 1
+      if imp.hit then
+        self.direct[self.shot.by] = self.direct[self.shot.by] + 1
+      end
+      audio.play(imp.hit and "bmb.direct" or "bmb.hit")
+      self:flash(imp.hit and "DIRECT HIT" or (dealt .. " DAMAGE"))
+    else
+      audio.play("bmb.thud")
+    end
+  end
+  self.phase = "settle"
+  self.settle = 0.9
+end
+
+function Game:flash(text)
+  self.message = text
+  self.messageTime = 1.4
+end
+
+--------------------------------------------------------------------- turn end
+function Game:endTurn()
+  local dead1 = self.tanks[P1].health <= 0
+  local dead2 = self.tanks[P2].health <= 0
+  if dead1 or dead2 then
+    self:finish(dead1 and dead2 and 0 or (dead1 and P2 or P1))
+    return
+  end
+  self.turn = (self.turn == P1) and P2 or P1
+  if self.turn == P1 then self.round = self.round + 1 end
+  self:newWind()
+  self.phase = "aim"
+  self.cpuPlan = nil
+  self.cpuThink = 0
+  audio.play("bmb.turn")
+
+  -- The host is the authority. After every shot it publishes a fingerprint of
+  -- the world; a guest that disagrees asks for the truth rather than playing
+  -- on in a different game.
+  if self.link and self.role == "host" then
+    self.link:send("sync", { h = self:fingerprint() })
+  end
+end
+
+function Game:finish(winner)
+  self.phase = "over"
+  self.finished = true
+  self.winner = winner
+  local me = self.me or P1
+  local won = (winner == me)
+
+  if self.link then
+    if won and not self.byDisconnect then self.score = 750 else self.score = 0 end
+    self.link:close("match over")
+  elseif self.twoPlayer then
+    self.score = 250
+  elseif won then
+    local left = self.tanks[me].health
+    local acc = self.shots[me] > 0 and (self.hits[me] / self.shots[me]) or 0
+    self.score = 500 + left * 5 + floor(acc * 400)
+    if self.cpu == "hard" then self.score = self.score + 400 end
+  else
+    self.score = 0
+  end
+  audio.play(won and "bmb.win" or "bmb.lose")
+end
+
+--------------------------------------------------------------------- desync
+--- A cheap fingerprint of everything that must match: both tanks and the
+--- shape of the ground. Not cryptographic, just enough that a real
+--- divergence shows up.
+function Game:fingerprint()
+  local h = 17
+  for p = P1, P2 do
+    local t = self.tanks[p]
+    h = (h * 31 + t.health + floor(t.x) * 7 + floor(t.y) * 13) % 1000000007
+  end
+  for x = 1, FIELD_W, 3 do
+    h = (h * 31 + self:surfaceAt(x)) % 1000000007
+  end
+  return h
+end
+
+function Game:snapshot()
+  local ground = {}
+  for x = 1, FIELD_W do ground[x] = self:surfaceAt(x) end
+  return {
+    g = ground,
+    t = {
+      { self.tanks[P1].health, floor(self.tanks[P1].x), floor(self.tanks[P1].y) },
+      { self.tanks[P2].health, floor(self.tanks[P2].x), floor(self.tanks[P2].y) },
+    },
+    turn = self.turn, wind = self.wind,
+  }
+end
+
+--- Rebuilding from a surface line loses overhangs, which is a fair trade: it
+--- is a rare correction and a consistent world matters more than a ledge.
+function Game:restore(snap)
+  if type(snap) ~= "table" or type(snap.g) ~= "table" then return end
+  local solid = {}
+  for x = 1, FIELD_W do
+    local top = snap.g[x] or GROUND_BOTTOM
+    if type(top) ~= "number" then top = GROUND_BOTTOM end
+    for y = max(SKY_TOP, floor(top)), GROUND_BOTTOM do solid[key(x, y)] = true end
+  end
+  self.solid = solid
+  self:rebuildRuns()
+  for p = P1, P2 do
+    local row = snap.t and snap.t[p]
+    if type(row) == "table" then
+      self.tanks[p].health = row[1] or self.tanks[p].health
+      self.tanks[p].x = row[2] or self.tanks[p].x
+      self.tanks[p].y = row[3] or self.tanks[p].y
+    end
+  end
+  if type(snap.turn) == "number" then self.turn = snap.turn end
+  if type(snap.wind) == "number" then self.wind = snap.wind end
+  self.desyncs = self.desyncs + 1
+  self:flash("RESYNCED")
+end
+
+------------------------------------------------------------------ networking
+function Game:onEvent(ev)
+  if not self.link then return end
+  local now = os.clock()
+
+  -- Answer stray lobby traffic before the link filters it away. A join from
+  -- our own opponent means our acceptance never arrived and they are still
+  -- sitting on a "joining..." screen, so say it again; a join from anyone
+  -- else deserves a refusal rather than silence, which would leave *them*
+  -- waiting instead.
+  local raw = net.parse(ev)
+  if raw and raw.t == "join" and raw.game == "bombard" then
+    if raw.from == self.link.peer and self.role == "host" then
+      net.accept(raw.from, { seed = self.seed })
+    elseif raw.from ~= self.link.peer then
+      net.refuse(raw.from, "already in a match")
+    end
+  end
+
+  self.link:handle(ev, now)
+  while true do
+    local msg = self.link:poll()
+    if not msg then break end
+    self:onNetMessage(msg)
+  end
+end
+
+function Game:onNetMessage(msg)
+  if msg.t == "shot" then
+    if type(msg.a) ~= "number" or type(msg.p) ~= "number" then return end
+    if self.phase ~= "aim" or self.turn == self.me then return end
+    self:fire(msg.a, msg.p, true)
+
+  elseif msg.t == "sync" then
+    if self.role == "host" then return end
+    if msg.h ~= self:fingerprint() then
+      self.link:send("resync", {})
+    end
+
+  elseif msg.t == "resync" then
+    if self.role ~= "host" then return end
+    self.link:send("state", { s = self:snapshot() })
+
+  elseif msg.t == "state" then
+    if self.role == "host" then return end
+    self:restore(msg.s)
+
+  elseif msg.t == "forfeit" then
+    if not self.finished then
+      self:flash("OPPONENT FORFEITED")
+      self:finish(self.me)
+    end
+  end
+end
+
+-------------------------------------------------------------------- CPU play
+--- The opponent aims by trying shots and keeping the one that lands nearest,
+--- then throws that answer off by an amount the difficulty decides. Searching
+--- and then deliberately missing gives an easy opponent that still plays
+--- plausible artillery, rather than one that fires at random.
+--- `who` defaults to the computer's own side. Taking it as an argument is
+--- what lets the attract-mode demo run both guns.
+function Game:planCpuShot(who)
+  who = who or P2
+  local me = self.tanks[who]
+  local foe = self.tanks[who == P1 and P2 or P1]
+  local bestA, bestP, bestD = (who == P1) and 45 or 135, 55, 1e9
+
+  self.lastPlan = self.lastPlan or {}
+  for i = 1, self.cpuTries do
+    local a, p
+    if i == 1 and self.lastPlan[who] then
+      a, p = self.lastPlan[who].a, self.lastPlan[who].p   -- start from what worked
+    elseif who == P1 then
+      a = 5 + math.random() * 80                 -- rightward, 5..85
+      p = 30 + math.random() * 65
+    else
+      a = 95 + math.random() * 80                -- leftward, 95..175
+      p = 30 + math.random() * 65
+    end
+    local _, imp = self:simulate(me.x + me.side * 4, me.y - 3, a, p, self.wind)
+    local dx, dy = imp.x - foe.x, imp.y - foe.y
+    local d = sqrt(dx * dx + dy * dy)
+    if d < bestD then bestA, bestP, bestD = a, p, d end
+  end
+
+  self.lastPlan[who] = { a = bestA, p = bestP }
+  local err = self.cpuError
+  return bestA + (math.random() * 2 - 1) * err,
+         max(5, min(100, bestP + (math.random() * 2 - 1) * err))
+end
+
+--------------------------------------------------------------------- update
+function Game:update(dt)
+  local now = os.clock()
+
+  if self.link then
+    self.link:update(now)
+    if not self.link:alive(now) and not self.finished then
+      -- The opponent vanished. Both consoles reach this point believing they
+      -- are the one still standing, so neither can honestly be called the
+      -- winner: the match is recorded as ended, not as won.
+      self.byDisconnect = true
+      self:flash("OPPONENT LOST")
+      self:finish(self.me)
+    end
+  end
+
+  if self.messageTime > 0 then
+    self.messageTime = self.messageTime - dt
+    if self.messageTime <= 0 then self.message = nil end
+  end
+  for p = P1, P2 do
+    local t = self.tanks[p]
+    if t.flash > 0 then t.flash = t.flash - dt end
+  end
+
+  -- particles
+  for i = #self.particles, 1, -1 do
+    local q = self.particles[i]
+    q.life = q.life - dt
+    if q.life <= 0 then
+      table.remove(self.particles, i)
+    else
+      q.x = q.x + q.vx * dt
+      q.y = q.y + q.vy * dt
+      q.vy = q.vy + 34 * dt
+    end
+  end
+
+  if self.finished then return end
+  if self.overlay then return end
+
+  if self.phase == "flight" then
+    -- Walking a precomputed path: the speed here is presentation only and
+    -- cannot change where the shell lands.
+    local s = self.shot
+    s.at = s.at + max(1, floor(dt * 90))
+    if s.at >= #s.path then
+      s.at = #s.path
+      self:resolveImpact()
+    end
+
+  elseif self.phase == "settle" then
+    self.settle = self.settle - dt
+    if self.settle <= 0 then self:endTurn() end
+
+  elseif self.phase == "aim" then
+    if self.cpu and self.turn == P2 then
+      self.cpuThink = (self.cpuThink or 0) + dt
+      if not self.cpuPlan and self.cpuThink > 0.45 then
+        local a, p = self:planCpuShot(P2)
+        self.cpuPlan = { a = a, p = p }
+      end
+      if self.cpuPlan and self.cpuThink > 1.1 then
+        self:fire(self.cpuPlan.a, self.cpuPlan.p)
+        self.cpuPlan = nil
+      end
+      return
+    end
+
+    if self:myTurn() then
+      local t = self:current()
+      local step = 34 * dt
+      local moved = false
+      if input.down(keys.left, keys.a) then t.angle = t.angle + step moved = true end
+      if input.down(keys.right, keys.d) then t.angle = t.angle - step moved = true end
+      if input.down(keys.up, keys.w) then t.power = t.power + step moved = true end
+      if input.down(keys.down, keys.s) then t.power = t.power - step moved = true end
+      if moved then
+        t.angle = max(0, min(180, t.angle))
+        t.power = max(5, min(100, t.power))
+        self.aimTick = (self.aimTick or 0) + dt
+        if self.aimTick > 0.12 then
+          self.aimTick = 0
+          audio.play("bmb.aim")
+        end
+      end
+    end
+  end
+end
+
+---------------------------------------------------------------------- input
+function Game:onKey(code, held)
+  if self.finished then return end
+
+  if code == keys.p and not held and self.suppressPause then
+    self.overlay = not self.overlay
+    return
+  end
+  if self.overlay then
+    if code == keys.q and not held then
+      if self.link then self.link:sendLoose("forfeit") end
+      self:finish(self.link and ((self.me == P1) and P2 or P1) or nil)
+    end
+    return
+  end
+
+  if held then return end
+  if code == keys.space or code == keys.enter or code == keys.numPadEnter then
+    if self:myTurn() then
+      local t = self:current()
+      self:fire(t.angle, t.power)
+    end
+  end
+end
+
+--- Aiming with the pointer: drag away from your gun and it aims the other
+--- way, like pulling back a catapult. The length of the pull is the power, so
+--- one gesture sets both numbers -- much quicker than nudging two dials.
+function Game:onMouse(kind, btn, x, y)
+  if self.finished or self.overlay then return end
+  if not self:myTurn() then return end
+  if kind ~= "mouse_click" and kind ~= "mouse_drag" and kind ~= "mouse_up" then return end
+
+  local px = (x - 1) * 2 + 1
+  local py = (y - 2) * 3 + 1        -- the canvas starts on terminal row 2
+  local t = self:current()
+  local dx, dy = px - t.x, py - (t.y - 3)
+  local len = sqrt(dx * dx + dy * dy)
+  if len < 2 then return end
+
+  -- pull back: the barrel points opposite the drag
+  local ax, ay = -dx, -dy
+  local angle
+  if ax == 0 and ay == 0 then
+    angle = t.angle
+  else
+    -- no portable two-argument atan, so take the angle from the unit vector
+    local ux = ax / len
+    local a = math.acos(max(-1, min(1, ux))) * 180 / pi
+    angle = (ay > 0) and (360 - a) or a
+  end
+  if angle > 180 then angle = (angle > 270) and 0 or 180 end
+
+  t.angle = max(0, min(180, angle))
+  -- The field is about a hundred pixels across, so a pull scaled near 1:1
+  -- lets the whole range of power be reached without leaving the screen --
+  -- at 2.4 a short drag already pinned it at maximum.
+  t.power = max(5, min(100, len * 1.15))
+
+  if kind == "mouse_up" then
+    self:fire(t.angle, t.power)
+  else
+    self.aimTick = (self.aimTick or 0) + 1
+    if self.aimTick % 3 == 0 then audio.play("bmb.aim") end
+  end
+end
+
+----------------------------------------------------------------------- draw
+--- Drawn from primitives rather than a sprite so the hull can take the
+--- player's colour and flash white when hit. A narrow turret over a wide
+--- hull is what makes it read as a gun rather than a brick at this size, and
+--- y is the pixel it stands on, so nothing sinks into the ground.
+local function drawTank(c, x, y, angle, col)
+  local a = angle * pi / 180
+  c:line(x, y - 3, floor(x + cos(a) * 7), floor(y - 3 - sin(a) * 7), col)
+  c:fill(x - 3, y - 1, 7, 2, col)          -- hull, bottom row sits on y
+  c:fill(x - 1, y - 3, 3, 2, col)          -- turret
+end
+
+local function healthBar(x, y, w, frac, col)
+  gfx.fill(x, y, w, 1, colors.gray)
+  local n = floor(w * frac + 0.5)
+  if n > 0 then gfx.fill(x, y, n, 1, col) end
+end
+
+function Game:draw()
+  local c = self.c
+  gfx.clear(colors.black)
+
+  ----------------------------------------------------------------- world
+  c:clear(colors.black)
+
+  -- The ground is one flat colour on purpose. A cell holds two colours, so a
+  -- highlight along the surface would win in some cells and lose in others
+  -- and read as noise; a single colour makes every crater legible.
+  for i = 1, #self.runs do
+    local r = self.runs[i]
+    c:fill(r[1], r[2], 1, r[3], colors.green)
+  end
+
+  -- where the last shot went
+  if self.tracer then
+    for i = 1, #self.tracer, 6 do
+      local pt = self.tracer[i]
+      local px, py = floor(pt[1] + 0.5), floor(pt[2] + 0.5)
+      if px >= 1 and px <= FIELD_W and py >= SKY_TOP and py <= GROUND_BOTTOM then
+        c:set(px, py, colors.gray)
+      end
+    end
+  end
+
+  -- tanks
+  for p = P1, P2 do
+    local t = self.tanks[p]
+    if t.health > 0 then
+      local col = (t.flash > 0 and floor(t.flash * 12) % 2 == 0) and colors.white or t.colour
+      drawTank(c, floor(t.x), floor(t.y), t.angle, col)
+    end
+  end
+
+  -- the shell in flight
+  if self.phase == "flight" and self.shot then
+    local pt = self.shot.path[min(self.shot.at, #self.shot.path)]
+    local px, py = floor(pt[1] + 0.5), floor(pt[2] + 0.5)
+    if px >= 1 and px <= FIELD_W and py >= SKY_TOP and py <= GROUND_BOTTOM then
+      c:set(px, py, colors.white)
+      c:set(px, py - 1, colors.lightGray)
+    end
+  end
+
+  for i = 1, #self.particles do
+    local q = self.particles[i]
+    local px, py = floor(q.x + 0.5), floor(q.y + 0.5)
+    if px >= 1 and px <= FIELD_W and py >= SKY_TOP and py <= GROUND_BOTTOM then
+      c:set(px, py, q.colour)
+    end
+  end
+
+  c:render()
+
+  ---------------------------------------------------------------- header
+  -- painted after the canvas, which covers everything below row one
+  gfx.fill(1, 1, gfx.W, 1, colors.gray)
+  local t1, t2 = self.tanks[P1], self.tanks[P2]
+  gfx.text(2, 1, "P1", colors.lightBlue, colors.gray)
+  healthBar(5, 1, 8, t1.health / START_HEALTH, colors.lightBlue)
+  gfx.right(gfx.W - 1, 1, "P2", colors.red, colors.gray)
+  healthBar(gfx.W - 12, 1, 8, t2.health / START_HEALTH, colors.red)
+
+  local arrow = self.wind == 0 and "--" or
+    (self.wind > 0 and ("> " .. abs(self.wind)) or ("< " .. abs(self.wind)))
+  gfx.center(1, "WIND " .. arrow, colors.white, colors.gray)
+
+  ------------------------------------------------------------------- HUD
+  if self.phase == "aim" and not self.finished then
+    local t = self:current()
+    local mine = self:myTurn() or not self.link
+    local label
+    if self.cpu and self.turn == P2 then
+      label = "OPPONENT AIMING"
+    elseif self.link then
+      label = mine and "YOUR SHOT" or "WAITING FOR OPPONENT"
+    else
+      label = (self.turn == P1 and "PLAYER ONE" or "PLAYER TWO")
+    end
+    gfx.text(2, 19, label, self.tanks[self.turn].colour, colors.black)
+    if mine and not (self.cpu and self.turn == P2) then
+      gfx.right(gfx.W - 1, 19,
+        string.format("ANG %3d  PWR %3d", floor(t.angle + 0.5), floor(t.power + 0.5)),
+        colors.white, colors.black)
+    end
+  end
+
+  if self.message then
+    gfx.center(17, " " .. self.message .. " ", colors.black, colors.yellow)
+  end
+
+  if self.overlay then
+    gfx.panel(12, 7, 28, 6, colors.gray, " Paused ", colors.white, colors.blue)
+    gfx.center(9, "P to resume", colors.white, colors.gray)
+    gfx.center(11, "Q to forfeit", colors.lightGray, colors.gray)
+  end
+
+  if self.finished then
+    local me = self.me or P1
+    local text
+    if self.winner == 0 then
+      text = "BOTH DESTROYED"
+    elseif self.link then
+      text = (self.winner == me) and "YOU WIN" or "YOU LOSE"
+    elseif self.twoPlayer then
+      text = (self.winner == P1) and "PLAYER ONE WINS" or "PLAYER TWO WINS"
+    else
+      text = (self.winner == P1) and "YOU WIN" or "YOU LOSE"
+    end
+    -- Written out rather than as `cond and a or b`: when the middle term is
+    -- false that idiom quietly falls through to the wrong branch, which is
+    -- exactly what it did here and painted a loss in winner's green.
+    local banner
+    if self.winner == 0 then
+      banner = colors.orange
+    elseif self.twoPlayer and not self.link then
+      banner = self.tanks[self.winner].colour
+    elseif self.winner == me then
+      banner = colors.lime
+    else
+      banner = colors.red
+    end
+    gfx.center(10, " " .. text .. " ", colors.black, banner)
+  end
+end
+
+--- Shown on the game-over card. Accuracy is the interesting number in an
+--- artillery game -- it is the one that improves as you learn to range.
+function Game:summary()
+  local me = self.me or P1
+  local shots = self.shots[me] or 0
+  local hits = self.hits[me] or 0
+  local pct = shots > 0 and floor(hits / shots * 100 + 0.5) or 0
+  local rows = {
+    { "Rounds", tostring(self.round) },
+    { "Shots fired", tostring(shots) },
+    { "On target", hits .. "  (" .. pct .. "%)" },
+    { "Direct hits", tostring(self.direct[me] or 0) },
+  }
+  if self.byDisconnect then
+    rows[#rows] = { "Result", "opponent lost" }
+  end
+  return rows
+end
+
+function Game:dispose()
+  if self.link then self.link:close("left") end
+  net.close()
+end
+
+--- Attract mode: the console plays itself, both guns driven by the same
+--- planner the opponent uses. An artillery duel is a good thing to show on an
+--- idle screen -- the arcs read from across a room, and the hill visibly
+--- falls apart as it goes.
+local function demo(self, frame)
+  -- Attract mode gets the good gunners regardless of which mode built the
+  -- instance: a duel between two poor shots is a poor advert for the game.
+  if not self.demoTuned then
+    self.demoTuned = true
+    self.cpuTries, self.cpuError = 40, 5
+  end
+  if self.finished or self.phase ~= "aim" or self.turn ~= P1 then return end
+  self.demoThink = (self.demoThink or 0) + 1
+  if self.demoThink < 14 then return end
+  self.demoThink = 0
+  local a, p = self:planCpuShot(P1)
+  self:fire(a, p)
+end
+
+------------------------------------------------------------------ configure
+--- The lobby. Runs before new() so nothing here blocks construction, and it
+--- is the whole of the "seamless" promise: hosts announce themselves and
+--- guests see them appear, so no one types an ID.
+local function lobby(api, mode)
+  local ui = api.ui
+  if not net.available() then
+    ui.alert(" No modem ", {
+      "This console has no modem.",
+      "Attach one to either console",
+      "and both will find each other.",
+    }, colors.orange)
+    return false
+  end
+
+  if mode.net == "host" then
+    local host, err = net.hosting("bombard")
+    if not host then
+      ui.alert(" Modem problem ", { tostring(err) }, colors.red)
+      return false
+    end
+    local seed = math.random(1, 1000000)
+    local result = nil
+    local dots = 0
+
+    local function draw()
+      gfx.clear(colors.black)
+      gfx.panel(6, 5, 40, 10, colors.gray, " Hosting ", colors.white, colors.blue)
+      gfx.center(7, "Waiting for a challenger" .. string.rep(".", dots), colors.white, colors.gray)
+      gfx.center(9, net.label(), colors.yellow, colors.gray)
+      gfx.center(11, "Anyone on this network can join", colors.lightGray, colors.gray)
+      gfx.center(13, "Q to cancel", colors.lightGray, colors.gray)
+    end
+
+    local function handle(ev)
+      local now = os.clock()
+      host:advertise(now)
+      dots = floor(now * 2) % 4
+      if ev[1] == "key" and (ev[2] == keys.q or ev[2] == keys.backspace) then
+        net.unhost("bombard")
+        net.close()
+        return 0
+      end
+      local join = host:handle(ev)
+      if join then
+        net.accept(join.from, { seed = seed })
+        net.unhost("bombard")
+        result = {
+          id = "host", name = "Host", seed = seed, role = "host",
+          link = net.link(join.from, net.cleanName(join.name, "Console " .. join.from)),
+          peerName = net.cleanName(join.name, "Console " .. join.from),
+        }
+        audio.play("bmb.connect")
+        return 1
+      end
+      return nil
+    end
+
+    -- a timer keeps the loop turning so adverts keep going out
+    local pump = os.startTimer(0.2)
+    local wrapped = function(ev)
+      if ev[1] == "timer" and ev[2] == pump then pump = os.startTimer(0.2) end
+      return handle(ev)
+    end
+    local r = ui.loop(draw, wrapped)
+    os.cancelTimer(pump)
+    if r ~= 1 then return false end
+    return result
+  end
+
+  ------------------------------------------------------------------- guest
+  local browser, err = net.browsing("bombard")
+  if not browser then
+    api.ui.alert(" Modem problem ", { tostring(err) }, colors.red)
+    return false
+  end
+
+  local sel = 1
+  local hosts = {}
+  local waiting = nil
+  local notice = nil          -- why the last attempt did not work
+  local result = nil
+
+  -- How long to keep asking before giving up. Long enough to ride out a few
+  -- lost messages, short enough that nobody sits looking at a frozen screen
+  -- wondering whether it is working.
+  local JOIN_TIMEOUT = 8
+
+  local function draw()
+    gfx.clear(colors.black)
+    gfx.panel(6, 3, 40, 15, colors.gray, " Join a match ", colors.white, colors.blue)
+    if waiting then
+      gfx.center(8, "Joining " .. waiting.name .. "...", colors.yellow, colors.gray)
+      gfx.center(10, "waiting for an answer", colors.lightGray, colors.gray)
+      gfx.center(17, "Q to cancel", colors.lightGray, colors.gray)
+      return
+    end
+    if notice then
+      gfx.center(16, gfx.clip(notice, 36), colors.orange, colors.gray)
+    end
+    if #hosts == 0 then
+      gfx.center(8, "Looking for hosts...", colors.lightGray, colors.gray)
+      gfx.center(10, "Start a host on the other", colors.lightGray, colors.gray)
+      gfx.center(11, "console and it appears here", colors.lightGray, colors.gray)
+    else
+      for i = 1, math.min(#hosts, 9) do
+        local on = (i == sel)
+        gfx.fill(8, 4 + i, 36, 1, on and colors.blue or colors.gray)
+        gfx.text(9, 4 + i, gfx.clip(hosts[i].name, 24),
+          on and colors.white or colors.lightGray, on and colors.blue or colors.gray)
+        gfx.right(43, 4 + i, "#" .. hosts[i].id,
+          on and colors.white or colors.lightGray, on and colors.blue or colors.gray)
+      end
+    end
+    gfx.center(17, "Enter to join    Q to cancel", colors.lightGray, colors.gray)
+  end
+
+  local function handle(ev)
+    local now = os.clock()
+    browser:handle(ev, now)
+    hosts = browser:list(now)
+    if sel > #hosts then sel = math.max(1, #hosts) end
+
+    if waiting then
+      local msg = net.parse(ev)
+      if msg and msg.from == waiting.id and msg.t == "accept" then
+        result = {
+          id = "join", name = "Guest", seed = msg.seed, role = "guest",
+          link = net.link(waiting.id, waiting.name), peerName = waiting.name,
+        }
+        audio.play("bmb.connect")
+        return 1
+      end
+      if msg and msg.from == waiting.id and msg.t == "refuse" then
+        notice = waiting.name .. " is " .. (msg.why or "not available")
+        waiting = nil
+        audio.play("ui.deny")
+        return nil
+      end
+      -- the host packed up while we were asking
+      if msg and msg.from == waiting.id and msg.t == "unhost" then
+        notice = waiting.name .. " stopped hosting"
+        waiting = nil
+        audio.play("ui.deny")
+        return nil
+      end
+      if ev[1] == "key" and (ev[2] == keys.q or ev[2] == keys.backspace) then
+        waiting = nil
+        return nil
+      end
+      -- Keep asking rather than assuming the first attempt landed, but do not
+      -- ask forever: without a limit a lost acceptance leaves the guest on
+      -- this screen indefinitely.
+      if now - waiting.started > JOIN_TIMEOUT then
+        notice = "No answer from " .. waiting.name
+        waiting = nil
+        audio.play("ui.deny")
+        return nil
+      end
+      if now - waiting.asked > 0.7 then
+        waiting.asked = now
+        net.requestJoin(waiting.id, "bombard")
+      end
+      return nil
+    end
+
+    if ev[1] == "key" then
+      local k = ev[2]
+      if k == keys.q or k == keys.backspace then
+        net.close()
+        return 0
+      elseif k == keys.up or k == keys.w then
+        sel = sel > 1 and sel - 1 or math.max(1, #hosts)
+      elseif k == keys.down or k == keys.s then
+        sel = sel < #hosts and sel + 1 or 1
+      elseif (k == keys.enter or k == keys.space) and hosts[sel] then
+        waiting = { id = hosts[sel].id, name = hosts[sel].name, asked = now, started = now }
+        notice = nil
+        net.requestJoin(waiting.id, "bombard")
+      end
+    elseif ev[1] == "mouse_click" then
+      local mx, my = api.ui.toLocal(ev[3], ev[4])
+      local row = my - 4
+      if row >= 1 and row <= #hosts and mx >= 8 and mx <= 43 then
+        if row == sel then
+          waiting = { id = hosts[sel].id, name = hosts[sel].name, asked = now, started = now }
+        notice = nil
+          net.requestJoin(waiting.id, "bombard")
+        else
+          sel = row
+        end
+      end
+    end
+    return nil
+  end
+
+  local pump = os.startTimer(0.2)
+  local wrapped = function(ev)
+    if ev[1] == "timer" and ev[2] == pump then pump = os.startTimer(0.2) end
+    return handle(ev)
+  end
+  local r = api.ui.loop(draw, wrapped)
+  os.cancelTimer(pump)
+  if r ~= 1 then
+    net.close()
+    return false
+  end
+  return result
+end
+
+local function configure(api, mode)
+  if not (mode and mode.net) then return mode end
+  return lobby(api, mode)
+end
+
+------------------------------------------------------------------- cover art
+--- The launcher gives this 56 x 21 pixels, which is small enough that the
+--- first attempt fell apart on it: the ground was drawn with a height of
+--- `c.h - y`, and wherever the hills dipped to the very bottom that height
+--- came out zero and left holes straight through the terrain.
+local function cover(c, t)
+  c:clear(colors.black)
+
+  local base = c.h - 3
+  local surf = {}
+  for x = 1, c.w do
+    local hill = 2.4 * sin(x / 6.5) + 1.4 * sin(x / 3.1 + 1.2)
+    local y = floor(base - hill + 0.5)
+    if y < 6 then y = 6 end
+    if y > c.h - 1 then y = c.h - 1 end
+    surf[x] = y
+    c:fill(x, y, 1, c.h - y + 1, colors.green)
+  end
+
+  --- A gun standing on the ground where it actually is, barrel included, so
+  --- it reads as artillery rather than a coloured brick.
+  local function gun(x, colour, facing)
+    local y = surf[x] - 1
+    c:fill(x - 2, y - 1, 5, 2, colour)
+    c:fill(x - 1, y - 3, 3, 2, colour)
+    c:line(x, y - 4, x + facing * 4, y - 7, colour)
+  end
+  gun(7, colors.lightBlue, 1)
+  gun(c.w - 6, colors.red, -1)
+
+  -- A shell crossing between them, with a pause at each end of the loop so
+  -- the arc reads as a shot rather than a permanent rainbow.
+  local n = 30
+  local span = (t * 0.45) % 1.5
+  local shown = floor(n * span)
+  if shown > n then shown = n end
+  for i = 1, shown do
+    local u = i / n
+    local x = floor(8 + u * (c.w - 16))
+    local y = floor(surf[7] - 6 - sin(u * pi) * 8)
+    if x >= 1 and x <= c.w and y >= 1 and y <= c.h then
+      c:set(x, y, colors.white)
+    end
+  end
+end
+
+return {
+  id = "bombard",
+  name = "Bombard",
+  tagline = "Two guns, one hill, and a modem",
+  accent = colors.orange,
+  order = 45,
+  cover = cover,
+  music = "descent",
+  controls = {
+    { "Left / Right", "Aim" },
+    { "Up / Down", "Power" },
+    { "Space", "Fire" },
+    { "Mouse", "Drag back and release" },
+    { "P", "Pause menu" },
+  },
+  modes = {
+    -- Calibrated against a reference player -- a bot that searches for a shot
+    -- and then misses by a human-sized margin -- rather than by eye. The
+    -- first cut had hard at tries 90 / error 2, which is a gun that never
+    -- misses: unbeatable, and exactly the mistake that made Invaders no fun.
+    -- These give that reference player roughly 88% / 66% / 32% of matches.
+    { id = "easy", name = "CPU: Easy", hint = "wild aim", cpu = "easy", tries = 8, error = 18 },
+    { id = "normal", name = "CPU: Normal", hint = "ranges you in", cpu = "normal", tries = 20, error = 12 },
+    { id = "hard", name = "CPU: Hard", hint = "rarely misses twice", cpu = "hard", tries = 48, error = 7 },
+    { id = "hotseat", name = "Same console", hint = "take turns", twoPlayer = true },
+    { id = "host", name = "Host a match", hint = "wait for a challenger", net = "host" },
+    { id = "join", name = "Join a match", hint = "find a host nearby", net = "join" },
+  },
+  trophies = {
+    { id = "bmb_win", name = "Ranged In", desc = "Win a duel",
+      test = function(g) return g.winner and g.winner == (g.me or 1) end },
+    { id = "bmb_hard", name = "Counter-Battery", desc = "Beat the hard opponent",
+      test = function(g) return g.cpu == "hard" and g.winner == 1 end },
+    { id = "bmb_direct", name = "Down The Barrel", desc = "Land a direct hit",
+      test = function(g) return (g.direct[g.me or 1] or 0) > 0 end },
+    { id = "bmb_net", name = "Across The Wire", desc = "Win a match over a modem",
+      test = function(g)
+        return g.link ~= nil and g.winner == g.me and not g.byDisconnect
+      end },
+  },
+  configure = configure,
+  demo = demo,
+  new = new,
+}
 ]=])
 file("gameos/games/breakout.lua", [=[
 --[[ Breakout -- 12x8 brick wall, multiball, lasers and falling power-ups.
@@ -859,6 +2093,24 @@ local function cover(c, t)
 end
 
 ----------------------------------------------------------------- definition
+--- Attract-mode bot: keep the paddle under the lowest ball, and let anything
+--- stuck go. Deliberately a little late, so the demo has near misses in it.
+local function demo(self, frame)
+  if self.finished then return end
+  local target = nil
+  local stuck = false
+  for _, b in ipairs(self.balls) do
+    if b.stuck then stuck = true end
+    if not target or b.y > target.y then target = b end
+  end
+  if stuck then self:release() end
+  if target then
+    self.mouseTarget = target.x - self.paddleW / 2 +
+      (frame % 60 < 30 and 2 or -2)
+  end
+  if frame % 25 == 0 then self:fire() end
+end
+
 return {
   id = "breakout",
   name = "Breakout",
@@ -886,6 +2138,7 @@ return {
     { id = "brk_clear", name = "Clean Sweep", desc = "Clear every wall",
       test = function(g) return g.won end },
   },
+  demo = demo,
   new = new,
 }
 ]=])
@@ -1682,6 +2935,23 @@ local function cover(c, t)
 end
 
 ----------------------------------------------------------------- definition
+--- Attract-mode bot: aim for the middle of the next gap and flap when below
+--- it. The lookahead is deliberately short, so it clips a pipe eventually.
+local function demo(self, frame)
+  if self.finished then return end
+  if self.state == "ready" then
+    self:flap()
+    return
+  end
+  local target = 22
+  local nearest
+  for _, p in ipairs(self.pipes) do
+    if p.x + 8 > 20 and (not nearest or p.x < nearest.x) then nearest = p end
+  end
+  if nearest then target = nearest.gapY + self.gap / 2 end
+  if self.y > target + 1 and self.vy > -8 then self:flap() end
+end
+
 return {
   id = "flappy",
   name = "Flappy",
@@ -1709,6 +2979,7 @@ return {
     { id = "fl_insane", name = "Threading It", desc = "Clear 10 pipes on Insane",
       test = function(g) return g.score >= 10 and g.gap <= 13 end },
   },
+  demo = demo,
   new = new,
 }
 ]=])
@@ -1964,15 +3235,44 @@ function Game:onKey(code, held)
   end
 end
 
+--- Two ways to play with a pointer: swipe across the board, or click toward
+--- an edge. The swipe is the natural gesture and takes priority; a click that
+--- goes nowhere falls back to the edge rule so a single tap still moves.
 function Game:onMouse(kind, btn, x, y)
-  if kind ~= "mouse_click" then return end
-  -- click a screen edge to slide that way
-  local cx, cy = gfx.W / 2, gfx.H / 2
-  local dx, dy = x - cx, y - cy
-  if math.abs(dx) * 0.4 > math.abs(dy) then
-    self:move(dx > 0 and "right" or "left")
-  else
-    self:move(dy > 0 and "down" or "up")
+  if kind == "mouse_click" then
+    self.dragFrom = { x, y }
+    self.dragged = false
+    return
+  end
+
+  if kind == "mouse_drag" and self.dragFrom then
+    local dx = x - self.dragFrom[1]
+    local dy = y - self.dragFrom[2]
+    -- characters are about twice as wide as they are tall, so horizontal
+    -- distance has to be scaled up before the two axes can be compared
+    local hx, hy = dx * 2, dy * 3
+    if not self.dragged and (hx * hx + hy * hy) >= 36 then
+      self.dragged = true
+      if math.abs(hx) > math.abs(hy) then
+        self:move(dx > 0 and "right" or "left")
+      else
+        self:move(dy > 0 and "down" or "up")
+      end
+    end
+    return
+  end
+
+  if kind == "mouse_up" then
+    local from = self.dragFrom
+    self.dragFrom = nil
+    if self.dragged or not from then return end
+    -- no swipe happened, so treat it as a click toward a screen edge
+    local dx, dy = from[1] - gfx.W / 2, from[2] - gfx.H / 2
+    if math.abs(dx) * 0.4 > math.abs(dy) then
+      self:move(dx > 0 and "right" or "left")
+    else
+      self:move(dy > 0 and "down" or "up")
+    end
   end
 end
 
@@ -2097,6 +3397,7 @@ return {
     { "Arrows / WASD", "Slide tiles" },
     { "U", "Undo one move" },
     { "Click", "Slide that way" },
+    { "Mouse", "Swipe or click an edge" },
     { "P", "Pause menu" },
   },
   trophies = {
@@ -2106,513 +3407,6 @@ return {
       test = function(g) return g.biggest >= 2048 end },
     { id = "g2048_10k", name = "Five Figures", desc = "Score ten thousand",
       test = function(g) return g.score >= 10000 end },
-  },
-  new = new,
-}
-]=])
-file("gameos/games/invaders.lua", [=[
---[[ Invaders -- a 40-strong formation, four destructible shields and a UFO.
-
-  The formation steps rather than glides, and the step interval shrinks as the
-  wave thins out, so the last few aliens really do come at you fast.
-]]
-
-local req = ...
-local gfx = req("lib.gfx")
-local Canvas = req("lib.canvas")
-local font = req("lib.font")
-local audio = req("lib.audio")
-local input = req("lib.input")
-
-local floor = math.floor
-local min, max = math.min, math.max
-
-local FIELD_W, FIELD_H = 102, 54
-local COLS, ROWS = 8, 5
-local STEP_X, STEP_Y = 2, 4
-local GAP_X, GAP_Y = 11, 7
-local PLAYER_Y = 47
-local SHIELD_Y = 39
-
-local Game = {}
-Game.__index = Game
-
-------------------------------------------------------------------- sprites
-local SPRITE_SRC = {
-  a1 = { "..####..", ".######.", "##.##.##", "########", ".#.##.#." },
-  a2 = { "..####..", ".######.", "##.##.##", "########", "#.#..#.#" },
-  b1 = { "#..##..#", ".######.", "##.##.##", "########", ".#....#." },
-  b2 = { "#..##..#", ".######.", "##.##.##", "########", "#.####.#" },
-  c1 = { "..####..", ".######.", "########", "#.#..#.#", "..#..#.." },
-  c2 = { "..####..", ".######.", "########", "#.#..#.#", ".#.##.#." },
-  ship = { "....#....", "...###...", ".#######.", "#########", "#########" },
-  ufo = { "..######..", ".########.", "##########", ".#.#..#.#." },
-}
-
-local SHIELD_SRC = {
-  "..########..",
-  ".##########.",
-  "############",
-  "############",
-  "###......###",
-  "##........##",
-}
-
-local ALIEN_KIND = {
-  { frames = { "a1", "a2" }, colour = colors.magenta, value = 30 },
-  { frames = { "b1", "b2" }, colour = colors.cyan, value = 20 },
-  { frames = { "b1", "b2" }, colour = colors.lightBlue, value = 20 },
-  { frames = { "c1", "c2" }, colour = colors.lime, value = 10 },
-  { frames = { "c1", "c2" }, colour = colors.green, value = 10 },
-}
-
--- Built at load time so the launcher can animate the cover before the game
--- has ever been started.
-local sprites = {}
-for name, rows in pairs(SPRITE_SRC) do
-  sprites[name] = Canvas.sprite(rows, { ["#"] = colors.white })
-end
-
---- Stamp a white-mask sprite in an arbitrary colour.
-local function stamp(c, spr, px, py, colour)
-  local w = spr.w
-  for sy = 1, spr.h do
-    local base = (sy - 1) * w
-    for sx = 1, w do
-      if spr.px[base + sx] then c:set(px + sx - 1, py + sy - 1, colour) end
-    end
-  end
-end
-
------------------------------------------------------------------- instance
-local function new(api, mode)
-  local self = setmetatable({}, Game)
-  self.api = api
-  self.c = Canvas.new(1, 2, gfx.W, 18, colors.black)
-  self.hard = (mode and mode.hard) or false
-  self.score = 0
-  self.lives = 3
-  self.wave = 1
-  self.kills = 0
-  self.finished = false
-  self.playerX = floor(FIELD_W / 2) - 4
-  self.shots = {}
-  self.bombs = {}
-  self.particles = {}
-  self.ufo = nil
-  self.ufoTimer = 14
-  self.respawn = 0
-  self:startWave()
-  return self
-end
-
-function Game:startWave()
-  self.aliens = {}
-  self.alive = 0
-  local baseY = 4 + min(4, (self.wave - 1)) * 2
-  for r = 1, ROWS do
-    for col = 1, COLS do
-      self.aliens[(r - 1) * COLS + col] = {
-        row = r, col = col, alive = true,
-        x = 4 + (col - 1) * GAP_X,
-        y = baseY + (r - 1) * GAP_Y,
-      }
-      self.alive = self.alive + 1
-    end
-  end
-  self.dir = 1
-  self.stepTimer = 0
-  self.frame = 1
-  self.dropped = false
-
-  self.shields = {}
-  for i = 1, 4 do
-    local grid = {}
-    for y = 1, #SHIELD_SRC do
-      local line = SHIELD_SRC[y]
-      for x = 1, #line do
-        grid[(y - 1) * 12 + x] = (line:sub(x, x) == "#")
-      end
-    end
-    self.shields[i] = { x = 8 + (i - 1) * 24, y = SHIELD_Y, px = grid }
-  end
-  self.waveMessage = 1.4
-end
-
-function Game:stepInterval()
-  local frac = self.alive / (COLS * ROWS)
-  local base = self.hard and 0.42 or 0.55
-  local fastest = self.hard and 0.045 or 0.07
-  local t = fastest + (base - fastest) * frac
-  return max(fastest, t - (self.wave - 1) * 0.02)
-end
-
----------------------------------------------------------------- collisions
-function Game:shieldHit(px, py, erase)
-  for i = 1, 4 do
-    local s = self.shields[i]
-    local lx = px - s.x + 1
-    local ly = py - s.y + 1
-    if lx >= 1 and lx <= 12 and ly >= 1 and ly <= #SHIELD_SRC then
-      local idx = (ly - 1) * 12 + lx
-      if s.px[idx] then
-        if erase then
-          -- blast a small crater
-          for dy = -1, 1 do
-            for dx = -2, 2 do
-              local nx, ny = lx + dx, ly + dy
-              if nx >= 1 and nx <= 12 and ny >= 1 and ny <= #SHIELD_SRC then
-                if math.random(1, 100) > 25 then
-                  s.px[(ny - 1) * 12 + nx] = false
-                end
-              end
-            end
-          end
-        end
-        return true
-      end
-    end
-  end
-  return false
-end
-
-function Game:boom(x, y, colour, count)
-  for _ = 1, (count or 8) do
-    self.particles[#self.particles + 1] = {
-      x = x, y = y,
-      vx = (math.random() - 0.5) * 40,
-      vy = (math.random() - 0.5) * 40,
-      life = 0.3 + math.random() * 0.3,
-      colour = colour,
-    }
-  end
-end
-
---------------------------------------------------------------------- input
-function Game:onKey(code, held)
-  if held then return end
-  if code == keys.space or code == keys.up or code == keys.w then
-    self:fire()
-  end
-end
-
-function Game:fire()
-  if self.respawn > 0 then return end
-  local limit = self.wave >= 3 and 2 or 1
-  if #self.shots >= limit then return end
-  self.shots[#self.shots + 1] = { x = self.playerX + 4, y = PLAYER_Y - 1 }
-  audio.play("inv.shoot")
-end
-
--------------------------------------------------------------------- update
-function Game:lowestInColumn(col)
-  local found = nil
-  for r = 1, ROWS do
-    local a = self.aliens[(r - 1) * COLS + col]
-    if a and a.alive then found = a end
-  end
-  return found
-end
-
-function Game:dropBomb()
-  local candidates = {}
-  for col = 1, COLS do
-    local a = self:lowestInColumn(col)
-    if a then candidates[#candidates + 1] = a end
-  end
-  if #candidates == 0 then return end
-  local a = candidates[math.random(1, #candidates)]
-  self.bombs[#self.bombs + 1] = { x = a.x + 4, y = a.y + 5, t = 0 }
-end
-
-function Game:advanceFormation()
-  local minX, maxX, maxY = 999, -999, -999
-  for i = 1, #self.aliens do
-    local a = self.aliens[i]
-    if a.alive then
-      if a.x < minX then minX = a.x end
-      if a.x + 8 > maxX then maxX = a.x + 8 end
-      if a.y + 5 > maxY then maxY = a.y + 5 end
-    end
-  end
-  if minX == 999 then return end
-
-  local drop = false
-  if self.dir > 0 and maxX + STEP_X > FIELD_W - 2 then drop = true end
-  if self.dir < 0 and minX - STEP_X < 3 then drop = true end
-
-  for i = 1, #self.aliens do
-    local a = self.aliens[i]
-    if a.alive then
-      if drop then
-        a.y = a.y + STEP_Y
-      else
-        a.x = a.x + self.dir * STEP_X
-      end
-    end
-  end
-  if drop then self.dir = -self.dir end
-  self.frame = 3 - self.frame
-  -- the march walks down four steps, the way the original does
-  self.marchStep = (self.marchStep or 0) % 4 + 1
-  audio.play("inv.march" .. self.marchStep)
-
-  if maxY + (drop and STEP_Y or 0) >= PLAYER_Y then
-    self.lives = 0
-    self.finished = true
-    audio.play("inv.die")
-  end
-end
-
-function Game:update(dt)
-  if self.finished then return end
-  if self.waveMessage > 0 then self.waveMessage = self.waveMessage - dt end
-
-  if self.respawn > 0 then
-    self.respawn = self.respawn - dt
-    if self.respawn <= 0 and self.lives <= 0 then
-      self.finished = true
-    end
-  end
-
-  -- player
-  if self.respawn <= 0 then
-    local dx = 0
-    if input.down(keys.left, keys.a) then dx = dx - 1 end
-    if input.down(keys.right, keys.d) then dx = dx + 1 end
-    self.playerX = self.playerX + dx * 52 * dt
-    if self.playerX < 3 then self.playerX = 3 end
-    if self.playerX + 9 > FIELD_W - 2 then self.playerX = FIELD_W - 2 - 9 end
-  end
-
-  -- formation
-  self.stepTimer = self.stepTimer + dt
-  local interval = self:stepInterval()
-  local guard = 0
-  while self.stepTimer >= interval and guard < 3 do
-    self.stepTimer = self.stepTimer - interval
-    guard = guard + 1
-    self:advanceFormation()
-  end
-
-  -- ufo
-  self.ufoTimer = self.ufoTimer - dt
-  if not self.ufo and self.ufoTimer <= 0 then
-    self.ufoTimer = 16 + math.random() * 12
-    local fromLeft = math.random(1, 2) == 1
-    self.ufo = {
-      x = fromLeft and -10 or FIELD_W,
-      dir = fromLeft and 1 or -1,
-      value = ({ 50, 100, 150, 200 })[math.random(1, 4)],
-    }
-  end
-  if self.ufo then
-    self.ufo.x = self.ufo.x + self.ufo.dir * 26 * dt
-    if self.ufo.x < -12 or self.ufo.x > FIELD_W + 2 then self.ufo = nil end
-  end
-
-  -- bombs
-  local rate = 0.55 - min(0.35, self.wave * 0.05)
-  self.bombTimer = (self.bombTimer or 0) + dt
-  if self.bombTimer > rate and #self.bombs < 4 + self.wave then
-    self.bombTimer = 0
-    if math.random(1, 100) <= 55 then self:dropBomb() end
-  end
-
-  for i = #self.bombs, 1, -1 do
-    local b = self.bombs[i]
-    b.y = b.y + 30 * dt
-    b.t = b.t + dt
-    local hit = false
-    if self:shieldHit(floor(b.x), floor(b.y), true) then
-      hit = true
-      audio.play("inv.shield")
-    elseif b.y >= PLAYER_Y and b.y <= PLAYER_Y + 5 and self.respawn <= 0 and
-           b.x >= self.playerX and b.x <= self.playerX + 9 then
-      hit = true
-      self.lives = self.lives - 1
-      self.respawn = 1.4
-      self:boom(self.playerX + 4, PLAYER_Y + 2, colors.orange, 16)
-      audio.play("inv.die")
-      for j = #self.bombs, 1, -1 do table.remove(self.bombs, j) end
-      break
-    elseif b.y > FIELD_H then
-      hit = true
-    end
-    if hit then table.remove(self.bombs, i) end
-  end
-
-  -- shots
-  for i = #self.shots, 1, -1 do
-    local s = self.shots[i]
-    s.y = s.y - 84 * dt
-    local gone = false
-    if s.y < 1 then
-      gone = true
-    elseif self.ufo and s.y <= 6 and s.x >= self.ufo.x and s.x <= self.ufo.x + 10 then
-      self.score = self.score + self.ufo.value
-      self:boom(self.ufo.x + 5, 3, colors.magenta, 14)
-      self.ufo = nil
-      gone = true
-      audio.play("inv.ufohit")
-    elseif self:shieldHit(floor(s.x), floor(s.y), true) then
-      gone = true
-      audio.play("inv.shield")
-    else
-      for k = 1, #self.aliens do
-        local a = self.aliens[k]
-        if a.alive and s.x >= a.x and s.x < a.x + 8 and s.y >= a.y and s.y < a.y + 5 then
-          a.alive = false
-          self.alive = self.alive - 1
-          self.kills = self.kills + 1
-          local kind = ALIEN_KIND[a.row]
-          self.score = self.score + kind.value * (1 + floor((self.wave - 1) / 2))
-          self:boom(a.x + 4, a.y + 2, kind.colour, 10)
-          -- the front rows are the low, fat ones
-          audio.play("inv.hit", (ROWS - a.row) * 2)
-          gone = true
-          break
-        end
-      end
-    end
-    if gone then table.remove(self.shots, i) end
-  end
-
-  -- particles
-  for i = #self.particles, 1, -1 do
-    local p = self.particles[i]
-    p.x = p.x + p.vx * dt
-    p.y = p.y + p.vy * dt
-    p.vy = p.vy + 40 * dt
-    p.life = p.life - dt
-    if p.life <= 0 then table.remove(self.particles, i) end
-  end
-
-  if self.alive <= 0 then
-    self.score = self.score + 200 * self.wave
-    self.wave = self.wave + 1
-    audio.play("result.newwave")
-    self.shots = {}
-    self.bombs = {}
-    self:startWave()
-  end
-end
-
----------------------------------------------------------------------- draw
-function Game:draw()
-  local c = self.c
-  c:clear(colors.black)
-
-  for i = 1, #self.aliens do
-    local a = self.aliens[i]
-    if a.alive then
-      local kind = ALIEN_KIND[a.row]
-      stamp(c, sprites[kind.frames[self.frame]], floor(a.x), floor(a.y), kind.colour)
-    end
-  end
-
-  if self.ufo then
-    stamp(c, sprites.ufo, floor(self.ufo.x), 1, colors.red)
-  end
-
-  for i = 1, 4 do
-    local s = self.shields[i]
-    for y = 1, #SHIELD_SRC do
-      for x = 1, 12 do
-        if s.px[(y - 1) * 12 + x] then
-          c:set(s.x + x - 1, s.y + y - 1, colors.lime)
-        end
-      end
-    end
-  end
-
-  if self.respawn <= 0 then
-    stamp(c, sprites.ship, floor(self.playerX), PLAYER_Y, colors.white)
-  end
-
-  for _, s in ipairs(self.shots) do
-    c:fill(floor(s.x), floor(s.y), 1, 3, colors.yellow)
-  end
-  for _, b in ipairs(self.bombs) do
-    local wig = floor(b.t * 14) % 2
-    c:fill(floor(b.x) - wig, floor(b.y), 1, 2, colors.red)
-    c:fill(floor(b.x) + wig - 1, floor(b.y) + 2, 1, 1, colors.orange)
-  end
-  for _, p in ipairs(self.particles) do
-    c:set(floor(p.x), floor(p.y), p.life > 0.2 and p.colour or colors.orange)
-  end
-
-  c:fill(1, FIELD_H - 1, FIELD_W, 1, colors.green)
-
-  if self.waveMessage > 0 then
-    local text = "WAVE " .. self.wave
-    local w = font.width(text, 2, 2)
-    font.draw(c, floor((FIELD_W - w) / 2), 25, text, colors.white, 2, 2)
-  end
-
-  c:render()
-
-  gfx.fill(1, 1, gfx.W, 1, colors.gray)
-  gfx.text(2, 1, "SCORE", colors.lightGray, colors.gray)
-  gfx.text(8, 1, gfx.commas(self.score), colors.white, colors.gray)
-  gfx.center(1, "WAVE " .. self.wave, colors.lime, colors.gray)
-  gfx.right(gfx.W - 1, 1, string.rep("^", max(0, self.lives)), colors.cyan, colors.gray)
-end
-
-function Game:summary()
-  return {
-    { "Wave", self.wave },
-    { "Aliens shot", self.kills },
-  }
-end
-
----------------------------------------------------------------------- cover
-local function cover(c, t)
-  c:clear(colors.black)
-  for i = 1, 18 do
-    local x = (i * 37) % c.w
-    local y = (i * 13) % c.h
-    c:set(x, y, colors.gray)
-  end
-  local sway = floor(math.sin(t * 1.2) * 6)
-  local frame = (floor(t * 2) % 2) + 1
-  for r = 1, 3 do
-    local kind = ALIEN_KIND[r * 2 - 1]
-    local spr = sprites[kind.frames[frame]]
-    for col = 1, 5 do
-      stamp(c, spr, 5 + (col - 1) * 10 + sway, 2 + (r - 1) * 6, kind.colour)
-    end
-  end
-  local sx0 = floor(c.w / 2 - 4 + math.sin(t * 2.1) * 14)
-  stamp(c, sprites.ship, sx0, c.h - 5, colors.white)
-  c:fill(sx0 + 4, c.h - 12, 1, 4, colors.yellow)
-end
-
------------------------------------------------------------------ definition
-return {
-  id = "invaders",
-  name = "Invaders",
-  tagline = "They come down in rows",
-  accent = colors.lime,
-  order = 40,
-  cover = cover,
-  music = "descent",
-  controls = {
-    { "Left / Right", "Move" },
-    { "Space", "Fire" },
-    { "P", "Pause menu" },
-  },
-  modes = {
-    { id = "normal", name = "Normal", hint = "3 lives" },
-    { id = "hard", name = "Hard", hint = "faster", hard = true },
-  },
-  trophies = {
-    { id = "inv_w3", name = "Hold The Line", desc = "Reach wave 3",
-      test = function(g) return g.wave >= 3 end },
-    { id = "inv_100", name = "Sharpshooter", desc = "Shoot 100 aliens in one run",
-      test = function(g) return g.kills >= 100 end },
-    { id = "inv_w5", name = "Last Stand", desc = "Reach wave 5",
-      test = function(g) return g.wave >= 5 end },
   },
   new = new,
 }
@@ -2889,7 +3683,7 @@ local input = req("lib.input")
 
 local floor = math.floor
 local sin, cos, pi = math.sin, math.cos, math.pi
-local sqrt = math.sqrt
+local sqrt, acos = math.sqrt, math.acos
 local max, min = math.max, math.min
 
 local W, H = 102, 57
@@ -3026,6 +3820,25 @@ function Game:onKey(code, held)
   end
 end
 
+--- The pointer is an aim target rather than a direct heading: the ship still
+--- turns at its own rate toward the cursor, so it keeps feeling like a ship
+--- with momentum instead of a turret that snaps. Left click fires, right
+--- click burns the engine for a short burst.
+function Game:onMouse(kind, btn, x, y)
+  if self.finished or self.dead then return end
+  if kind == "mouse_click" or kind == "mouse_drag" then
+    self.aimX = (x - 1) * 2 + 1
+    self.aimY = (y - 1) * 3 + 1
+    if kind == "mouse_click" then
+      if btn == 2 then
+        self.thrustBurst = 0.4
+      else
+        self:fire()
+      end
+    end
+  end
+end
+
 -------------------------------------------------------------------- update
 function Game:hitShip()
   if self.invuln > 0 or self.dead then return end
@@ -3074,9 +3887,38 @@ function Game:update(dt)
   else
     self.invuln = max(0, self.invuln - dt)
     local s = self.ship
-    if input.down(keys.left, keys.a) then s.angle = s.angle - 3.4 * dt end
-    if input.down(keys.right, keys.d) then s.angle = s.angle + 3.4 * dt end
-    s.thrust = input.down(keys.up, keys.w)
+    local turning = false
+    if input.down(keys.left, keys.a) then
+      s.angle = s.angle - 3.4 * dt
+      turning = true
+    end
+    if input.down(keys.right, keys.d) then
+      s.angle = s.angle + 3.4 * dt
+      turning = true
+    end
+    if turning then self.aimX = nil end     -- keys take the helm back
+    if self.aimX then
+      -- Shortest way round to the cursor, capped at the ship's turn rate.
+      -- There is no portable atan2 here (5.2 has no two-argument atan, 5.4
+      -- has no atan2), so the turn comes from the forward vector directly:
+      -- the dot product gives how far round the target is, the cross product
+      -- gives which way.
+      local dx, dy = self.aimX - s.x, self.aimY - s.y
+      local len = sqrt(dx * dx + dy * dy)
+      if len > 1 then
+        dx, dy = dx / len, dy / len
+        local fx, fy = cos(s.angle), sin(s.angle)
+        local dot = fx * dx + fy * dy
+        if dot > 1 then dot = 1 elseif dot < -1 then dot = -1 end
+        local diff = acos(dot)
+        if fx * dy - fy * dx < 0 then diff = -diff end
+        local step = 3.4 * dt
+        if diff > step then diff = step elseif diff < -step then diff = -step end
+        s.angle = s.angle + diff
+      end
+    end
+    self.thrustBurst = max(0, (self.thrustBurst or 0) - dt)
+    s.thrust = input.down(keys.up, keys.w) or self.thrustBurst > 0
     if s.thrust then
       s.vx = s.vx + cos(s.angle) * 62 * dt
       s.vy = s.vy + sin(s.angle) * 62 * dt
@@ -3352,6 +4194,8 @@ return {
     { "Up", "Thrust" },
     { "Space", "Fire" },
     { "H or Down", "Hyperspace" },
+    { "Mouse", "Aim, click to fire" },
+    { "Right click", "Thrust burst" },
     { "P", "Pause menu" },
   },
   trophies = {
@@ -3858,6 +4702,13 @@ end
 --------------------------------------------------------------------- input
 function Game:onKey(code, held) end
 
+--- Mouse aims the left paddle: its centre follows the pointer, which is a far
+--- more natural way to play Pong than tapping a direction key.
+function Game:onMouse(kind, btn, x, y)
+  if kind ~= "mouse_click" and kind ~= "mouse_drag" then return end
+  self.mouseY = (y - 1) * 3 + 1 - floor(PADDLE_H / 2)
+end
+
 -------------------------------------------------------------------- update
 function Game:movePaddle(y, dir, dt, speed)
   y = y + dir * speed * dt
@@ -3928,7 +4779,17 @@ function Game:update(dt)
   local ldir = 0
   if input.down(keys.w, keys.up) then ldir = ldir - 1 end
   if input.down(keys.s, keys.down) then ldir = ldir + 1 end
-  self.leftY = self:movePaddle(self.leftY, ldir, dt, pspeed)
+  if ldir ~= 0 then self.mouseY = nil end   -- a key press takes the paddle back
+  if self.mouseY then
+    -- ease toward the pointer rather than teleporting, so the paddle keeps a
+    -- speed limit and the ball can still be beaten past it
+    local delta = self.mouseY - self.leftY
+    local step = pspeed * 1.8 * dt
+    if delta > step then delta = step elseif delta < -step then delta = -step end
+    self.leftY = self:movePaddle(self.leftY + delta, 0, dt, pspeed)
+  else
+    self.leftY = self:movePaddle(self.leftY, ldir, dt, pspeed)
+  end
 
   if self.twoPlayer then
     local rdir = 0
@@ -4074,6 +4935,7 @@ return {
     { "W / S", "Left paddle" },
     { "Up / Down", "Left paddle" },
     { "I / K", "Right paddle (2P)" },
+    { "Mouse", "Move left paddle" },
     { "P", "Pause menu" },
   },
   modes = {
@@ -4383,7 +5245,7 @@ local OX, OY = 4, 4
 local Game = {}
 Game.__index = Game
 
-local floor = math.floor
+local floor, abs = math.floor, math.abs
 
 ------------------------------------------------------------------ helpers
 local function key(x, y) return (y - 1) * COLS + x end
@@ -4502,6 +5364,26 @@ function Game:onKey(code, held)
   elseif code == keys.down or code == keys.s then self:turn("down")
   elseif code == keys.left or code == keys.a then self:turn("left")
   elseif code == keys.right or code == keys.d then self:turn("right")
+  end
+end
+
+--- Steering by pointer: a click turns the snake toward wherever you clicked,
+--- along whichever axis it is furthest away on. It cannot be as precise as
+--- the keys on a tight lattice, but it makes the game playable with a mouse.
+function Game:onMouse(kind, btn, x, y)
+  if kind ~= "mouse_click" and kind ~= "mouse_drag" then return end
+  local h = self.body[self.head]
+  if not h then return end
+  local gx = floor(((x - 1) * 2 + 1 - OX) / CELL) + 1
+  local gy = floor(((y - 1) * 3 + 1 - OY) / CELL) + 1
+  local dx, dy = gx - h.x, gy - h.y
+  if dx == 0 and dy == 0 then return end
+  -- turn along the axis with the greater gap; ties keep the current heading's
+  -- perpendicular so a click never asks for an impossible reversal
+  if abs(dx) > abs(dy) then
+    self:turn(dx > 0 and "right" or "left")
+  else
+    self:turn(dy > 0 and "down" or "up")
   end
 end
 
@@ -4721,6 +5603,48 @@ local function cover(c, t)
 end
 
 ----------------------------------------------------------------- definition
+--- Attract-mode bot. Steers toward the food on whichever axis is free,
+--- preferring a turn that does not immediately run into its own body. It is
+--- not a solver -- it will eventually trap itself, which is fine, because a
+--- demo that dies now and then looks like someone playing.
+local function demo(self, frame)
+  if self.finished or self.dying > 0 or not self.food then return end
+  if frame % 2 ~= 0 then return end
+  local h = self.body[self.head]
+  if not h then return end
+
+  local function blocked(dx, dy)
+    local nx, ny = h.x + dx, h.y + dy
+    if self.mode ~= "wrap" and (nx < 1 or nx > COLS or ny < 1 or ny > ROWS) then
+      return true
+    end
+    for i = 1, #self.body do
+      local seg = self.body[i]
+      if seg and seg.x == nx and seg.y == ny then return true end
+    end
+    return false
+  end
+
+  local wants = {}
+  if self.food.x < h.x then wants[#wants + 1] = { "left", -1, 0 }
+  elseif self.food.x > h.x then wants[#wants + 1] = { "right", 1, 0 } end
+  if self.food.y < h.y then wants[#wants + 1] = { "up", 0, -1 }
+  elseif self.food.y > h.y then wants[#wants + 1] = { "down", 0, 1 } end
+  -- anything at all, if the preferred ways are walled off
+  wants[#wants + 1] = { "left", -1, 0 }
+  wants[#wants + 1] = { "right", 1, 0 }
+  wants[#wants + 1] = { "up", 0, -1 }
+  wants[#wants + 1] = { "down", 0, 1 }
+
+  for i = 1, #wants do
+    local w = wants[i]
+    if not blocked(w[2], w[3]) then
+      self:turn(w[1])
+      return
+    end
+  end
+end
+
 return {
   id = "snake",
   name = "Snake",
@@ -4731,6 +5655,7 @@ return {
   music = "serpentine",
   controls = {
     { "Arrows/WASD", "Turn" },
+    { "Mouse", "Click to steer" },
     { "P", "Pause menu" },
   },
   modes = {
@@ -4746,6 +5671,7 @@ return {
     { id = "snake_long", name = "Long Boy", desc = "Grow to 40 segments",
       test = function(g) return g:length() >= 40 end },
   },
+  demo = demo,
   new = new,
 }
 ]=])
@@ -4762,7 +5688,7 @@ local gfx = req("lib.gfx")
 local audio = req("lib.audio")
 local data = req("lib.data")
 
-local floor = math.floor
+local floor, abs = math.floor, math.abs
 
 local Game = {}
 Game.__index = Game
@@ -5107,10 +6033,81 @@ function Game:onKey(code, held)
   elseif code == keys.r and not held then
     self:restart()
   end
+  self.path = nil          -- any key press cancels a queued walk
+end
+
+--- Click a square to walk there. A neighbouring square is just a step, so
+--- pushing still works by clicking the box you want to shove; anywhere else
+--- is a shortest path through free squares, which is how every Sokoban with
+--- a mouse has worked and saves a great deal of tapping.
+function Game:walkTo(tx, ty)
+  local startK = self:key(self.px, self.py)
+  local goalK = self:key(tx, ty)
+  if startK == goalK then return end
+  if self.walls[goalK] or self.boxes[goalK] then return end
+
+  local came, queue, head = { [startK] = false }, { { self.px, self.py } }, 1
+  while head <= #queue do
+    local node = queue[head]; head = head + 1
+    local cx, cy = node[1], node[2]
+    if cx == tx and cy == ty then break end
+    for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+      local nx, ny = cx + d[1], cy + d[2]
+      if nx >= 1 and nx <= self.w and ny >= 1 and ny <= self.h then
+        local k = self:key(nx, ny)
+        if came[k] == nil and not self.walls[k] and not self.boxes[k] then
+          came[k] = { cx, cy, d[1], d[2] }
+          queue[#queue + 1] = { nx, ny }
+        end
+      end
+    end
+  end
+
+  if came[goalK] == nil then return end            -- walled off
+  local path, cx, cy = {}, tx, ty
+  while true do
+    local from = came[self:key(cx, cy)]
+    if not from then break end
+    table.insert(path, 1, { from[3], from[4] })
+    cx, cy = from[1], from[2]
+  end
+  self.path = path
+  self.pathAt = 0
+end
+
+function Game:onMouse(kind, btn, x, y)
+  if self.finished or kind ~= "mouse_click" then return end
+  local gx = floor((x - self.ox) / self.cw) + 1
+  local gy = floor((y - self.oy) / self.ch) + 1
+  if gx < 1 or gx > self.w or gy < 1 or gy > self.h then return end
+
+  local dx, dy = gx - self.px, gy - self.py
+  if (dx == 0 and abs(dy) == 1) or (dy == 0 and abs(dx) == 1) then
+    self.path = nil
+    self:step(dx, dy)
+  else
+    self:walkTo(gx, gy)
+  end
 end
 
 function Game:update(dt)
   if self.flash > 0 then self.flash = self.flash - dt end
+
+  -- drain a queued walk one square at a time, so it reads as walking rather
+  -- than teleporting and each footstep still gets its sound
+  if self.path then
+    self.pathAt = self.pathAt + dt
+    while self.path and self.pathAt > 0.055 do
+      self.pathAt = self.pathAt - 0.055
+      local move = table.remove(self.path, 1)
+      if not move then
+        self.path = nil
+      else
+        self:step(move[1], move[2])
+        if #self.path == 0 then self.path = nil end
+      end
+    end
+  end
 end
 
 ---------------------------------------------------------------------- draw
@@ -5251,6 +6248,7 @@ return {
     { "Arrows / WASD", "Walk / push" },
     { "U", "Undo" },
     { "R", "Restart level" },
+    { "Mouse", "Click a square to walk there" },
     { "P", "Pause menu" },
   },
   configure = configure,
@@ -5749,6 +6747,49 @@ function Game:onKey(code, held)
   end
 end
 
+--- Where the piece's cells actually sit, which is what the pointer should
+--- line up with -- the bounding-box origin is off-centre for most shapes.
+function Game:pieceSpan()
+  local shape = SHAPES[self.kind][self.rot + 1]
+  local lo, hi = 99, -99
+  for i = 1, 4 do
+    local x = self.px + shape[i][1]
+    if x < lo then lo = x end
+    if x > hi then hi = x end
+  end
+  return lo, hi
+end
+
+--- Mouse play: click a column in the well to slide the piece there, scroll to
+--- rotate, and click below the well to hard drop. The slide is a target
+--- rather than a teleport so the piece still has to travel past obstacles.
+function Game:onMouse(kind, btn, x, y)
+  if self.finished or self.clearRows or not self.kind then return end
+  local px = (x - 1) * 2 + 1
+  local py = (y - 1) * 3 + 1
+
+  if kind == "mouse_scroll" then
+    self:rotate(btn > 0 and 1 or -1)
+    return
+  end
+  if kind ~= "mouse_click" and kind ~= "mouse_drag" then return end
+
+  if btn == 2 then
+    self:swapHold()
+    return
+  end
+  -- below the floor of the well: drop it
+  if kind == "mouse_click" and py >= WELL_Y + VISIBLE * BH then
+    self:hardDrop()
+    return
+  end
+
+  local col = floor((px - WELL_X) / BW) + 1
+  if col < 1 then col = 1 elseif col > COLS then col = COLS end
+  local lo, hi = self:pieceSpan()
+  self.mouseCol = col - floor((hi - lo) / 2)
+end
+
 function Game:update(dt)
   if self.finished then return end
 
@@ -5756,6 +6797,29 @@ function Game:update(dt)
     self.clearTimer = self.clearTimer - dt
     if self.clearTimer <= 0 then self:collapse() end
     return
+  end
+
+  -- walk toward a clicked column, one cell per gravity-independent tick, and
+  -- give up the moment the piece cannot get any closer (a wall or a stack)
+  if self.mouseCol then
+    self.mouseTimer = (self.mouseTimer or 0) + dt
+    while self.mouseTimer > 0.03 do
+      self.mouseTimer = self.mouseTimer - 0.03
+      local lo = self:pieceSpan()
+      local d = self.mouseCol - lo
+      if d == 0 then
+        self.mouseCol = nil
+        break
+      end
+      if not self:tryMove(d > 0 and 1 or -1, 0) then
+        self.mouseCol = nil
+        break
+      end
+      audio.play("tet.move")
+    end
+  end
+  if input.down(keys.left, keys.a) or input.down(keys.right, keys.d) then
+    self.mouseCol = nil
   end
 
   local steps = self.dasLeft:update(input.down(keys.left, keys.a), dt)
@@ -5972,6 +7036,8 @@ return {
     { "Z", "Rotate left" },
     { "Space", "Hard drop" },
     { "C or Shift", "Hold piece" },
+    { "Mouse", "Click a column, scroll to spin" },
+    { "Click below well", "Hard drop" },
     { "P", "Pause menu" },
   },
   modes = {
@@ -7666,9 +8732,10 @@ song("ricochet", {
   },
 })
 
---============================================================== Invaders
--- A slow, heavy descent. The formation is already a metronome, so this
--- stays out of the way and just adds dread.
+--============================================================== Bombard
+-- A slow, heavy descent: a duel where each turn lands harder than the last.
+-- The bass walks down under a held figure, so it builds without hurrying the
+-- player, who is doing arithmetic in their head between shots.
 song("descent", {
   title = "Descent",
   tempo = 4,
@@ -7827,6 +8894,367 @@ music.ROWS = ROWS
 
 return music
 ]=])
+file("gameos/lib/net.lua", [=[
+--[[ net -- console-to-console play over a modem.
+
+  The whole design goal is that nobody ever types a computer ID. One console
+  says "host", the other says "join", and they find each other. That is what
+  the advert/announce pair below is for: a host shouts on a well-known channel
+  a few times a second, every console listening builds a live list, and stale
+  entries fall off on their own. Nothing is configured and nothing is
+  remembered between sessions.
+
+  Raw modem traffic rather than rednet, deliberately:
+    * no dependency on the rednet daemon being alive under whatever shell the
+      console was launched from,
+    * wired and wireless modems behave identically,
+    * and the event we care about, modem_message, arrives through the normal
+      event loop, so a game stays responsive while it waits.
+
+  Delivery. Modems inside range do not drop packets, but a computer can leave
+  range, be unloaded with its chunk, or simply be turned off, and none of
+  those announce themselves. So every link carries:
+    * a heartbeat, and a timeout that decides the peer is gone,
+    * sequence numbers with acknowledgements and resends for messages that
+      matter, because one lost turn deadlocks a turn-based match forever.
+
+  Nothing here trusts what arrives. A message is a table, carries our marker,
+  and comes from the computer we are actually linked to, or it is dropped.
+]]
+
+local net = {}
+
+local LOBBY = 6502              -- where hosts advertise and joins arrive
+local MARKER = "gameos"
+local PROTOCOL = 1
+
+net.ADVERT_EVERY = 0.5          -- how often a host shouts
+net.ADVERT_STALE = 2.5          -- a host unheard this long drops off the list
+net.HEARTBEAT_EVERY = 0.5
+net.LINK_TIMEOUT = 5.0          -- silence this long means the peer is gone
+net.RESEND_AFTER = 0.6
+
+local modem = nil
+local modemSide = nil
+
+------------------------------------------------------------------ the modem
+--- Any modem will do, wired or wireless. Wireless is preferred when both are
+--- attached, since two consoles side by side on a wired network is the rarer
+--- setup and a wired modem with no cable simply never hears anything.
+local function findModem()
+  local best, bestSide
+  for _, side in ipairs(peripheral.getNames()) do
+    if peripheral.getType(side) == "modem" then
+      local m = peripheral.wrap(side)
+      local wireless = m.isWireless and m.isWireless()
+      if wireless then return m, side end
+      if not best then best, bestSide = m, side end
+    end
+  end
+  return best, bestSide
+end
+
+function net.available()
+  local m = findModem()
+  return m ~= nil
+end
+
+function net.id() return os.getComputerID() end
+
+--- A label arrives from another computer, and somebody there chose it. Trim
+--- it to something that can safely be drawn: printable ASCII only, bounded
+--- length, and never empty. This is the only text from off this machine that
+--- the console ever puts on screen.
+function net.cleanName(value, fallback)
+  if type(value) ~= "string" then return fallback end
+  local out = {}
+  for i = 1, #value do
+    local b = value:byte(i)
+    if b >= 32 and b <= 126 then
+      out[#out + 1] = string.char(b)
+      if #out >= 24 then break end
+    end
+  end
+  if #out == 0 then return fallback end
+  return table.concat(out)
+end
+
+function net.label()
+  local label = os.getComputerLabel()
+  if label and #label > 0 then return label end
+  return "Console " .. net.id()
+end
+
+--- Our own inbox channel. Computer IDs are small and stable, so they double
+--- as channel numbers; the modulo only guards against a silly-large ID on a
+--- long-lived world.
+function net.channel(id) return (id or net.id()) % 60000 + 1000 end
+
+function net.open()
+  if modem then return true end
+  local m, side = findModem()
+  if not m then return false, "No modem attached" end
+  modem, modemSide = m, side
+  local ok, err = pcall(function()
+    modem.open(LOBBY)
+    modem.open(net.channel())
+  end)
+  if not ok then
+    modem = nil
+    return false, tostring(err)
+  end
+  return true
+end
+
+function net.close()
+  if not modem then return end
+  pcall(function()
+    modem.close(LOBBY)
+    modem.close(net.channel())
+  end)
+  modem, modemSide = nil, nil
+end
+
+function net.isOpen() return modem ~= nil end
+
+------------------------------------------------------------------- sending
+local function transmit(channel, body)
+  if not modem then return false end
+  body[MARKER] = PROTOCOL
+  body.from = net.id()
+  return pcall(modem.transmit, channel, net.channel(), body)
+end
+
+function net.broadcast(body) return transmit(LOBBY, body) end
+function net.sendTo(id, body) return transmit(net.channel(id), body) end
+
+--- Pull our kind of message out of a raw event, or nil. Everything that is
+--- not a well-formed message from this protocol is simply not ours.
+function net.parse(ev)
+  if ev[1] ~= "modem_message" then return nil end
+  local body = ev[5]
+  if type(body) ~= "table" then return nil end
+  if body[MARKER] ~= PROTOCOL then return nil end
+  if type(body.t) ~= "string" then return nil end
+  if type(body.from) ~= "number" then return nil end
+  return body
+end
+
+--------------------------------------------------------------------- lobby
+--- A host shouting into the dark. Call it every frame; it rate-limits itself.
+local Host = {}
+Host.__index = Host
+
+function net.hosting(game, extra)
+  local ok, err = net.open()
+  if not ok then return nil, err end
+  return setmetatable({
+    game = game,
+    extra = extra or {},
+    last = -1,
+    seen = {},
+  }, Host)
+end
+
+function Host:advertise(now)
+  if now - self.last < net.ADVERT_EVERY then return end
+  self.last = now
+  local body = { t = "advert", game = self.game, name = net.label() }
+  for k, v in pairs(self.extra) do body[k] = v end
+  net.broadcast(body)
+end
+
+--- A join request arrives here. Returns the joiner's id once, so the caller
+--- can decide; answering is net.accept / net.refuse.
+function Host:handle(ev)
+  local msg = net.parse(ev)
+  if not msg then return nil end
+  if msg.t == "join" and msg.game == self.game then return msg end
+  return nil
+end
+
+function net.accept(id, payload)
+  local body = { t = "accept" }
+  for k, v in pairs(payload or {}) do body[k] = v end
+  net.sendTo(id, body)
+end
+
+function net.refuse(id, why)
+  net.sendTo(id, { t = "refuse", why = why })
+end
+
+function net.unhost(game)
+  if net.isOpen() then net.broadcast({ t = "unhost", game = game }) end
+end
+
+--- The other side of the lobby: a live list of hosts, kept fresh by adverts
+--- and pruned when they stop arriving.
+local Browser = {}
+Browser.__index = Browser
+
+function net.browsing(game)
+  local ok, err = net.open()
+  if not ok then return nil, err end
+  return setmetatable({ game = game, hosts = {} }, Browser)
+end
+
+function Browser:handle(ev, now)
+  local msg = net.parse(ev)
+  if not msg then return end
+  if msg.game ~= self.game then return end
+  if msg.t == "advert" then
+    local entry = self.hosts[msg.from]
+    if not entry then
+      -- Somewhere to stop, so a misbehaving network cannot grow this without
+      -- limit. Nobody has thirty consoles hosting the same game.
+      local n = 0
+      for _ in pairs(self.hosts) do n = n + 1 end
+      if n >= 24 then return end
+      entry = { id = msg.from }
+      self.hosts[msg.from] = entry
+    end
+    entry.name = net.cleanName(msg.name, "Console " .. msg.from)
+    entry.seen = now
+  elseif msg.t == "unhost" then
+    self.hosts[msg.from] = nil
+  end
+end
+
+--- Sorted by id so the list does not shuffle under the cursor while adverts
+--- arrive in whatever order they happen to.
+function Browser:list(now)
+  local out = {}
+  for id, entry in pairs(self.hosts) do
+    if now - entry.seen <= net.ADVERT_STALE then
+      out[#out + 1] = entry
+    else
+      self.hosts[id] = nil
+    end
+  end
+  table.sort(out, function(a, b) return a.id < b.id end)
+  return out
+end
+
+function net.requestJoin(id, game)
+  net.sendTo(id, { t = "join", game = game, name = net.label() })
+end
+
+---------------------------------------------------------------------- link
+--- An established connection to one peer.
+local Link = {}
+Link.__index = Link
+
+function net.link(peerId, peerName)
+  return setmetatable({
+    peer = peerId,
+    name = peerName or ("Console " .. peerId),
+    outSeq = 0,
+    inSeq = 0,
+    pending = {},         -- seq -> { body, sentAt }
+    inbox = {},
+    lastHeard = os.clock(),
+    lastBeat = 0,
+    closed = false,
+  }, Link)
+end
+
+--- Fire and forget: heartbeats and anything else where a lost copy does no
+--- harm because a fresher one is right behind it.
+function Link:sendLoose(t, payload)
+  local body = { t = t }
+  for k, v in pairs(payload or {}) do body[k] = v end
+  net.sendTo(self.peer, body)
+end
+
+--- Guaranteed and in order. Used for the messages a match cannot lose.
+function Link:send(t, payload)
+  self.outSeq = self.outSeq + 1
+  local body = { t = t, seq = self.outSeq }
+  for k, v in pairs(payload or {}) do body[k] = v end
+  self.pending[self.outSeq] = { body = body, sentAt = os.clock() }
+  net.sendTo(self.peer, body)
+  return self.outSeq
+end
+
+function Link:handle(ev, now)
+  local msg = net.parse(ev)
+  if not msg then return end
+  if msg.from ~= self.peer then return end        -- not our conversation
+  self.lastHeard = now
+
+  if msg.t == "ack" then
+    self.pending[msg.seq] = nil
+    return
+  end
+  if msg.t == "bye" then
+    self.closed = true
+    self.byeReason = msg.why
+    return
+  end
+  if msg.t == "beat" then return end
+
+  if msg.seq then
+    -- Acknowledge every time, including duplicates: a resend means our last
+    -- acknowledgement is what went missing.
+    self:sendLoose("ack", { seq = msg.seq })
+    if msg.seq <= self.inSeq then return end      -- already delivered
+    if msg.seq > self.inSeq + 1 then
+      -- Out of order. Hold it rather than delivering a gap; the missing one
+      -- is being resent and will arrive.
+      self.held = self.held or {}
+      self.held[msg.seq] = msg
+      return
+    end
+    self.inSeq = msg.seq
+    self.inbox[#self.inbox + 1] = msg
+    -- drain anything that was waiting on this one
+    while self.held and self.held[self.inSeq + 1] do
+      self.inSeq = self.inSeq + 1
+      self.inbox[#self.inbox + 1] = self.held[self.inSeq]
+      self.held[self.inSeq] = nil
+    end
+  else
+    self.inbox[#self.inbox + 1] = msg
+  end
+end
+
+--- Heartbeats out, resends for anything unacknowledged. Call every frame.
+function Link:update(now)
+  if self.closed then return end
+  if now - self.lastBeat >= net.HEARTBEAT_EVERY then
+    self.lastBeat = now
+    self:sendLoose("beat")
+  end
+  for seq, item in pairs(self.pending) do
+    if now - item.sentAt >= net.RESEND_AFTER then
+      item.sentAt = now
+      net.sendTo(self.peer, item.body)
+    end
+  end
+end
+
+function Link:poll()
+  if #self.inbox == 0 then return nil end
+  return table.remove(self.inbox, 1)
+end
+
+function Link:alive(now)
+  if self.closed then return false end
+  return (now - self.lastHeard) < net.LINK_TIMEOUT
+end
+
+--- Seconds of silence, for showing a warning before the link is declared dead.
+function Link:silence(now) return now - self.lastHeard end
+
+function Link:close(why)
+  if not self.closed then
+    self:sendLoose("bye", { why = why })
+    self.closed = true
+  end
+end
+
+return net
+]=])
 file("gameos/lib/runtime.lua", [=[
 --[[ runtime -- plays one game module.
 
@@ -7875,36 +9303,167 @@ local function crash(def, err)
 end
 
 --------------------------------------------------------------- pause screen
+--- The guide, in the sense that the Xbox and the Switch use the word: the
+--- things you want mid-game without leaving the game. Volume above all --
+--- somebody walks into the room and you want it down now, not after four
+--- menus -- so the three knobs are here as sliders you nudge in place, and
+--- the trophy list is one keypress away.
+---
+--- This blocks the session loop while it is open, which is why a networked
+--- game sets suppressPause and draws its own overlay instead.
 local function pauseMenu(def, api)
   audio.play("ui.back")
+
+  local KNOBS = {
+    { label = "Master",  key = "volMaster", field = "master" },
+    { label = "Music",   key = "volMusic",  field = "music" },
+    { label = "Effects", key = "volSfx",    field = "sfx" },
+  }
+
+  -- rows: 1 Resume, 2 Restart, 3 Controls, 4 Trophies, 5..7 knobs, 8 Quit
+  local ACTIONS = { "Resume", "Restart", "Controls", "Trophies" }
+  local ROWS = #ACTIONS + #KNOBS + 1
+  local QUIT = ROWS
+
+  local X, Y, W, H = 10, 4, 32, 14
+  local FIRST = Y + 2
+  local BAR_X = X + W - 14      -- leaves room for the number after it
+  local accent = def.accent or colors.lightBlue
+  local sel = 1
+
+  local function knobAt(row)
+    local i = row - #ACTIONS
+    if i >= 1 and i <= #KNOBS then return KNOBS[i] end
+    return nil
+  end
+
+  local function setKnob(knob, value)
+    if value < 0 then value = 0 elseif value > 10 then value = 10 end
+    if value == data.get(knob.key) then return end
+    data.set(knob.key, value)
+    audio.volumes[knob.field] = value / 10
+    audio.play("ui.move")
+  end
+
+  local function nudge(knob, dir)
+    setKnob(knob, data.get(knob.key) + dir)
+  end
+
+  local function draw()
+    gfx.panel(X, Y, W, H, colors.gray, " Paused ", colors.white, accent)
+    for i = 1, #ACTIONS do
+      local y = FIRST + i - 1
+      local on = (sel == i)
+      gfx.fill(X + 1, y, W - 2, 1, on and accent or colors.gray)
+      gfx.text(X + 2, y, ACTIONS[i],
+        on and gfx.contrast(accent) or colors.white, on and accent or colors.gray)
+    end
+    for i = 1, #KNOBS do
+      local row = #ACTIONS + i
+      local y = FIRST + row - 1
+      local on = (sel == row)
+      local bg = on and accent or colors.gray
+      gfx.fill(X + 1, y, W - 2, 1, bg)
+      gfx.text(X + 2, y, KNOBS[i].label, on and gfx.contrast(accent) or colors.white, bg)
+      -- Three bars stacked with nothing between them read as one slab, so
+      -- each carries its number: that is what makes a level legible at a
+      -- glance rather than something you have to measure.
+      local level = data.get(KNOBS[i].key)
+      gfx.bar(BAR_X, y, 10, level / 10,
+        on and gfx.contrast(accent) or colors.lime, on and accent or colors.black)
+      gfx.right(X + W - 2, y, string.format("%2d", level),
+        on and gfx.contrast(accent) or colors.white, bg)
+    end
+    local y = FIRST + QUIT - 1
+    local on = (sel == QUIT)
+    gfx.fill(X + 1, y, W - 2, 1, on and colors.red or colors.gray)
+    gfx.text(X + 2, y, "Quit to menu",
+      on and colors.white or colors.lightGray, on and colors.red or colors.gray)
+    gfx.center(Y + H - 1, gfx.clip(def.name, W - 4), colors.lightGray, colors.gray, X, W)
+  end
+
+  --- Screens are opened by the loop below rather than from inside the event
+  --- handler: ui.loop nested inside another ui.loop's handler would swallow
+  --- the outer loop's pump timer, and the outer loop would quietly stop
+  --- driving the music.
+  local function activate()
+    if sel == 1 then return "resume" end
+    if sel == 2 then return "restart" end
+    if sel == 3 then return "controls" end
+    if sel == 4 then return "trophies" end
+    if sel == QUIT then return "quit" end
+    local knob = knobAt(sel)
+    if knob then nudge(knob, 1) end
+    return nil
+  end
+
+  local function handle(ev)
+    local name = ev[1]
+    if name == "key" then
+      local k = ev[2]
+      if k == keys.up or k == keys.w then
+        sel = sel > 1 and sel - 1 or ROWS
+        audio.play("ui.move")
+      elseif k == keys.down or k == keys.s then
+        sel = sel < ROWS and sel + 1 or 1
+        audio.play("ui.move")
+      elseif k == keys.left or k == keys.a then
+        local knob = knobAt(sel)
+        if knob then nudge(knob, -1) end
+      elseif k == keys.right or k == keys.d then
+        local knob = knobAt(sel)
+        if knob then nudge(knob, 1) end
+      elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
+        return activate()
+      elseif k == keys.p or k == keys.q or k == keys.backspace then
+        return "resume"
+      end
+
+    elseif name == "mouse_scroll" then
+      local _, my = ui.toLocal(ev[3], ev[4])
+      local row = my - FIRST + 1
+      local knob = knobAt(row)
+      if knob then
+        sel = row
+        nudge(knob, ev[2] > 0 and 1 or -1)
+      end
+
+    elseif name == "mouse_click" or name == "mouse_drag" then
+      local mx, my = ui.toLocal(ev[3], ev[4])
+      local row = my - FIRST + 1
+      local knob = knobAt(row)
+      -- clicking or dragging along a bar sets that level directly
+      if knob and mx >= BAR_X - 1 and mx < BAR_X + 10 then
+        sel = row
+        setKnob(knob, mx - BAR_X + 1)
+        return nil
+      end
+      if name == "mouse_drag" then return nil end
+      if ev[2] == 2 then return "resume" end
+      if row >= 1 and row <= ROWS and mx > X and mx < X + W - 1 then
+        if row == sel then return activate() end
+        sel = row
+        audio.play("ui.move")
+      elseif mx < X or mx >= X + W or my < Y or my >= Y + H then
+        return "resume"
+      end
+    end
+    return nil
+  end
+
   while true do
-    local items = {
-      { label = "Resume" },
-      { label = "Restart" },
-      { label = "Controls" },
-      { label = "Volume", hint = math.floor(audio.volumes.master * 10) .. "/10" },
-      { label = "Quit to menu" },
-    }
-    local pick = ui.picker({
-      title = " Paused ",
-      items = items,
-      accent = def.accent or colors.lightBlue,
-      width = 28,
-      footer = def.name,
-    })
-    if pick == 0 or pick == 1 then return "resume" end
-    if pick == 2 then return "restart" end
-    if pick == 3 then
+    local result = ui.loop(draw, handle)
+    if ui.terminated then return "quit" end
+    if result == "controls" then
       ui.controls(def)
-    elseif pick == 4 then
-      -- step the master knob down and wrap, so it is adjustable mid-game
-      local step = math.floor(audio.volumes.master * 10 + 0.5) - 2
-      if step < 0 then step = 10 end
-      audio.volumes.master = step / 10
-      data.set("volMaster", step)
-      audio.play("ui.select")
-    elseif pick == 5 then
-      return "quit"
+    elseif result == "trophies" then
+      api.require("os.trophies").run(api)
+    elseif result == "restart" or result == "quit" then
+      data.flush()
+      return result
+    else
+      data.flush()
+      return "resume"          -- "resume", 0 from a cancel, or anything odd
     end
     if ui.terminated then return "quit" end
   end
@@ -7949,6 +9508,71 @@ local function awardTrophies(def, inst, api)
   end
   for _, entry in ipairs(GLOBAL) do consider(entry, api) end
   return won
+end
+
+---------------------------------------------------------------- trophy toast
+--- Consoles announce an achievement the moment it happens, not in a summary
+--- afterwards, because the announcement is the reward. GameOS used to list
+--- them only on the game-over card, which meant a trophy earned in the first
+--- minute went unmentioned until the run was over.
+---
+--- awardTrophies is already idempotent -- it skips anything held -- so it can
+--- simply be run during play and whatever it returns is newly earned.
+local TROPHY_ICON = gfx.makeGlyph({
+  "..######..",
+  "..######..",
+  "#..####..#",
+  "#..####..#",
+  ".#.####.#.",
+  "...####...",
+  "..######..",
+  ".########.",
+})
+
+local Toasts = {}
+Toasts.__index = Toasts
+
+local function newToasts()
+  return setmetatable({ queue = {}, showing = nil, t = 0 }, Toasts)
+end
+
+function Toasts:add(entry) self.queue[#self.queue + 1] = entry end
+
+function Toasts:update(dt)
+  if not self.showing then
+    if #self.queue == 0 then return end
+    self.showing = table.remove(self.queue, 1)
+    self.t = 0
+    audio.play("ui.trophy")
+    return
+  end
+  self.t = self.t + dt
+  if self.t > 3.0 then
+    self.showing = nil
+    self.t = 0
+  end
+end
+
+function Toasts:draw()
+  local entry = self.showing
+  if not entry then return end
+  local w = 24
+  -- slide in, hold, slide out, so it never simply blinks into existence
+  local slide
+  if self.t < 0.25 then
+    slide = 1 - self.t / 0.25
+  elseif self.t > 2.75 then
+    slide = (self.t - 2.75) / 0.25
+  else
+    slide = 0
+  end
+  local x = gfx.W - w + floor(slide * (w + 1) + 0.5)
+  if x > gfx.W then return end
+
+  gfx.fill(x, 2, w, 4, colors.gray)
+  gfx.blitGlyph(x + 1, 3, TROPHY_ICON, colors.yellow, colors.gray)
+  gfx.text(x + 7, 3, gfx.clip("TROPHY", w - 8), colors.yellow, colors.gray)
+  gfx.text(x + 7, 4, gfx.clip(entry.name, w - 8), colors.white, colors.gray)
 end
 
 ------------------------------------------------------------ game over card
@@ -8115,6 +9739,26 @@ local function session(def, api, mode)
   local fpsAcc, fpsFrames, fps = 0, 0, 0
   local outcome = nil
 
+  --- Every way out of the loop below has to release whatever the game took
+  --- hold of. That matters most for a networked match: leaving without
+  --- disposing keeps the modem channels open and, worse, denies the other
+  --- console the goodbye that would end its match cleanly instead of after a
+  --- five second timeout.
+  local released = false
+  local function release()
+    if released then return end       -- disposing twice would be a surprise
+    released = true
+    if inst.dispose then pcall(inst.dispose, inst) end
+  end
+  local function bail(err)
+    release()
+    return crash(def, err)
+  end
+
+  local toasts = newToasts()
+  local trophyTimer = 0
+  local earned = {}          -- everything won this session, for the card
+
   while not outcome do
     local ev = { os.pullEventRaw() }
     local name = ev[1]
@@ -8129,13 +9773,26 @@ local function session(def, api, mode)
       audio.update(nowClock)
 
       local uok, uerr = pcall(inst.update, inst, dt)
-      if not uok then return crash(def, uerr) end
+      if not uok then return bail(uerr) end
+
+      -- Twice a second is often enough to feel immediate and rare enough
+      -- that the predicates cost nothing.
+      trophyTimer = trophyTimer + dt
+      if trophyTimer >= 0.5 then
+        trophyTimer = 0
+        local fresh = awardTrophies(def, inst, api)
+        for i = 1, #fresh do
+          earned[#earned + 1] = fresh[i]
+          toasts:add(fresh[i])
+        end
+      end
+      toasts:update(dt)
 
       gfx.beginFrame()
       local dok, derr = pcall(inst.draw, inst)
       if not dok then
         gfx.endFrame()
-        return crash(def, derr)
+        return bail(derr)
       end
       if showFps then
         fpsAcc = fpsAcc + dt
@@ -8146,6 +9803,7 @@ local function session(def, api, mode)
         end
         gfx.right(gfx.W, 1, string.format("%2d", fps), colors.lime, colors.black)
       end
+      toasts:draw()
       gfx.endFrame()
       input.endFrame()
 
@@ -8157,13 +9815,18 @@ local function session(def, api, mode)
 
     elseif name == "key" then
       local k, held = ev[2], ev[3]
-      if k == keys.p and not held then
+      -- A networked game cannot afford a blocking pause menu: the event loop
+      -- stops, heartbeats stop with it, and the other console decides we
+      -- dropped out. Such a game sets suppressPause and draws its own overlay
+      -- instead, which keeps the link alive.
+      if k == keys.p and not held and not inst.suppressPause then
         local choice = pauseMenu(def, api)
         input.reset()
         os.cancelTimer(timer)
         timer = os.startTimer(TICK)
         last = os.clock()
         if choice == "restart" then
+          release()
           return "retry"
         elseif choice == "quit" then
           outcome = "abandon"
@@ -8172,7 +9835,7 @@ local function session(def, api, mode)
         input.onKey(k, held)
         if inst.onKey then
           local kok, kerr = pcall(inst.onKey, inst, k, held)
-          if not kok then return crash(def, kerr) end
+          if not kok then return bail(kerr) end
         end
       end
 
@@ -8188,7 +9851,7 @@ local function session(def, api, mode)
       input.onMouse(name, ev[2], mx, my)
       if inst.onMouse then
         local mok, merr = pcall(inst.onMouse, inst, name, ev[2], mx, my)
-        if not mok then return crash(def, merr) end
+        if not mok then return bail(merr) end
       end
 
     elseif name == "mouse_scroll" then
@@ -8196,24 +9859,42 @@ local function session(def, api, mode)
       if inst.onMouse then pcall(inst.onMouse, inst, "mouse_scroll", ev[2], mx, my) end
 
     elseif name == "monitor_touch" then
+      -- A touch has no press-and-release pair, so send both halves at once:
+      -- games that wait for the release (2048's swipe) would otherwise never
+      -- see the gesture finish on an advanced monitor.
       local mx, my = ui.toLocal(ev[3], ev[4])
       input.onMouse("mouse_click", 1, mx, my)
-      if inst.onMouse then pcall(inst.onMouse, inst, "mouse_click", 1, mx, my) end
+      if inst.onMouse then
+        pcall(inst.onMouse, inst, "mouse_click", 1, mx, my)
+        pcall(inst.onMouse, inst, "mouse_up", 1, mx, my)
+      end
 
     elseif name == "term_resize" then
       if not gfx.handleResize() then outcome = "abandon" end
 
     elseif name == "terminate" then
       outcome = "abandon"
+
+    elseif inst.onEvent then
+      -- Anything the console itself does not consume -- modem traffic above
+      -- all -- is offered to the game whole.
+      local eok, eerr = pcall(inst.onEvent, inst, ev)
+      if not eok then return bail(eerr) end
     end
   end
 
   os.cancelTimer(timer)
+  -- Give the game a chance to let go of anything outside itself -- an open
+  -- modem channel, above all -- before the session is torn down.
+  release()
   audio.stopMusic()
   local elapsed = os.clock() - startClock
   data.recordPlay(def.id, elapsed)
 
+  -- Anything the periodic check has not seen yet -- a trophy for finishing,
+  -- above all -- plus everything already toasted, so the card is complete.
   local trophies = awardTrophies(def, inst, api)
+  for i = 1, #earned do trophies[#trophies + 1] = earned[i] end
 
   if outcome == "abandon" then
     data.flush()
@@ -8502,26 +10183,32 @@ M["brk.life"]    = mix(
   stab("FS3", 0.75),
   shift(fall("bass", "A3", "FS3", 4, 0.08, 0.5), 0.08))
 
---============================================================== invaders
--- the march is four notes cycled by the game, so it walks down a fifth
-M["inv.march1"]  = blip("bass", "D4", 0.34)
-M["inv.march2"]  = blip("bass", "C4", 0.34)
-M["inv.march3"]  = blip("bass", "AS3", 0.34)
-M["inv.march4"]  = blip("bass", "A3", 0.34)
-M["inv.shoot"]   = mix(fall("bit", "FS5", "A4", 4, 0.022, 0.34), blip("hat", "FS5", 0.16))
-M["inv.hit"]     = mix(
-  blip("snare", 6, 0.42),
-  shift(fall("bit", "A4", "D4", 3, 0.03, 0.3), 0.02))
-M["inv.ufo"]     = { { 0, "flute", P("A4"), 0.3 }, { 0.09, "flute", P("D5"), 0.3 } }
-M["inv.ufohit"]  = mix(
-  rise("chime", "D4", "FS5", 5, 0.04, 0.5),
-  shift(blip("snare", 8, 0.4), 0))
-M["inv.bomb"]    = blip("hat", "D4", 0.16)
-M["inv.shield"]  = blip("snare", 2, 0.3)
-M["inv.die"]     = mix(
-  stab("FS3", 0.9),
-  shift(roll("snare", 4, 4, 0.08, 0.5), 0.05),
-  shift(fall("didgeridoo", "D4", "FS3", 5, 0.08, 0.5), 0.1))
+--============================================================== bombard
+-- Artillery wants weight rather than zap: a hollow thump leaving the barrel,
+-- a whistle in the air, and a real crump when it lands.
+M["bmb.aim"]     = blip("hat", "D4", 0.10)
+M["bmb.fire"]    = mix(
+  thump("basedrum", "FS3", 0.8),
+  shift(fall("didgeridoo", "D4", "FS3", 3, 0.045, 0.45), 0.03))
+M["bmb.thud"]    = mix(
+  blip("basedrum", 4, 0.5),
+  shift(fall("bass", "A3", "FS3", 2, 0.06, 0.35), 0.03))
+M["bmb.hit"]     = mix(
+  stab("FS3", 0.8),
+  shift(roll("snare", 5, 3, 0.06, 0.45), 0.03))
+M["bmb.direct"]  = mix(
+  stab("FS3", 0.95),
+  shift(roll("snare", 6, 4, 0.055, 0.5), 0.02),
+  shift(fall("didgeridoo", "D4", "FS3", 4, 0.07, 0.55), 0.06))
+M["bmb.miss"]    = fall("flute", "D5", "D4", 5, 0.05, 0.3)
+M["bmb.turn"]    = blip("pling", "D5", 0.3)
+M["bmb.connect"] = rise("bell", "D4", "D5", 4, 0.07, 0.5)
+M["bmb.win"]     = mix(
+  rise("bell", "D4", "FS5", 5, 0.08, 0.6),
+  shift(chord("harp", { "D4", "FS4", "A4" }, 0.5, 0.02), 0.24))
+M["bmb.lose"]    = mix(
+  fall("bass", "D4", "FS3", 5, 0.1, 0.55),
+  shift(blip("snare", 2, 0.35), 0.12))
 
 --============================================================== minesweeper
 M["ms.reveal"]   = blip("hat", "A4", 0.18)
@@ -8793,7 +10480,19 @@ function ui.dialog(opts)
           return opts.cancel or 0
         end
       end
+    elseif name == "mouse_scroll" then
+      local dir = ev[2]
+      local n = sel + dir
+      if n >= 1 and n <= #buttons then
+        sel = n
+        audio.play("ui.move")
+      end
     elseif name == "mouse_click" then
+      -- right-click reads as "back" everywhere in the interface
+      if ev[2] == 2 and opts.cancel ~= 0 then
+        audio.play("ui.back")
+        return opts.cancel or 0
+      end
       local mx, my = ui.toLocal(ev[3], ev[4])
       local i = hitTest(rects, mx, my)
       if i then
@@ -8928,6 +10627,10 @@ function ui.picker(opts)
       local dir = ev[2]
       sel = math.min(#items, math.max(1, sel + dir))
     elseif name == "mouse_click" then
+      if ev[2] == 2 then
+        audio.play("ui.back")
+        return 0
+      end
       local mx, my = ui.toLocal(ev[3], ev[4])
       local row = my - (y + 2)
       if row >= 0 and row < rows and mx >= x and mx < x + w then
@@ -9390,6 +11093,15 @@ local function knob(label, key, field, preview)
     value = function() return data.get(key) end,
     get = function() return data.get(key) .. "/10" end,
     bar = function() return data.get(key) / 10 end,
+    -- dragging the bar jumps straight to a level, which is how a volume
+    -- slider is expected to behave
+    setTo = function(v)
+      if v < 0 then v = 0 elseif v > 10 then v = 10 end
+      if v == data.get(key) then return end
+      data.set(key, v)
+      audio.volumes[field] = v / 10
+      if preview then preview(v) end
+    end,
     cycle = function(dir)
       local v = data.get(key) + dir
       if v < 0 then v = 10 elseif v > 10 then v = 0 end
@@ -9464,6 +11176,7 @@ function settings.run(api)
 
   local sel = 1
   local FIRST_Y = 4
+  local BAR_X = gfx.W - 20        -- must match the bar drawn below
 
   local function step(dir)
     local i = sel
@@ -9499,7 +11212,7 @@ function settings.run(api)
           gfx.text(4, y, row.label, fg, bg)
           if row.bar then
             -- the knob's own level, drawn behind the label
-            gfx.bar(gfx.W - 20, y, 10, row.bar(), on and gfx.contrast(colors.lightBlue) or colors.lime,
+            gfx.bar(BAR_X, y, 10, row.bar(), on and gfx.contrast(colors.lightBlue) or colors.lime,
               on and colors.lightBlue or colors.gray)
           end
           if row.get then
@@ -9555,9 +11268,32 @@ function settings.run(api)
         audio.play("ui.back")
         return 1
       end
-    elseif name == "mouse_click" then
+    elseif name == "mouse_scroll" then
+      -- the wheel adjusts whatever row the pointer is over
+      local _, my = ui.toLocal(ev[3], ev[4])
+      local i = my - FIRST_Y + 1
+      if rows[i] and not rows[i].spacer then
+        sel = i
+        if rows[i].cycle then
+          rows[i].cycle(ev[2] > 0 and 1 or -1)
+          audio.play("ui.move")
+        end
+      end
+    elseif name == "mouse_click" or name == "mouse_drag" then
       local mx, my = ui.toLocal(ev[3], ev[4])
       local i = my - FIRST_Y + 1
+
+      -- a click or drag anywhere along a knob's bar sets that level directly
+      if rows[i] and rows[i].setTo and mx >= BAR_X - 1 and mx < BAR_X + 10 then
+        sel = i
+        rows[i].setTo(mx - BAR_X + 1)
+        return nil
+      end
+      if name == "mouse_drag" then return nil end
+      if ev[2] == 2 then
+        audio.play("ui.back")
+        return 1
+      end
       if rows[i] and not rows[i].spacer then
         if i == sel then
           local row = rows[sel]
@@ -9598,6 +11334,7 @@ local font = req("lib.font")
 local audio = req("lib.audio")
 local data = req("lib.data")
 local ui = req("lib.ui")
+local input = req("lib.input")   -- attract mode drives real game frames
 
 local shell = {}
 
@@ -9732,6 +11469,8 @@ function shell.run(api)
   local saverOn = false
   local saverX, saverY, saverVX, saverVY = 10, 10, 26, 15
   local saverHue = 1
+  local attract = nil          -- the demo currently playing itself
+  local attractPick = 0
 
   local function clampView()
     if sel < top then top = sel end
@@ -9898,6 +11637,63 @@ function shell.run(api)
     gfx.endFrame()
   end
 
+  -------------------------------------------------------------- attract mode
+  --- What an arcade cabinet does when nobody is standing at it: play itself.
+  --- A game opts in by exporting a `demo(inst, frame)` bot; anything without
+  --- one is simply never chosen, and if no game has one the old bouncing
+  --- logo takes over instead.
+  ---
+  --- The instance is built directly rather than through runtime.play, so no
+  --- score is recorded, no trophy is awarded and nothing is saved: a demo is
+  --- a picture of a game, not a session.
+  local DEMO_SECONDS = 22
+
+  local function demoPool()
+    local pool = {}
+    for i = 1, #entries do
+      local e = entries[i]
+      if e.kind == "game" and type(e.def.demo) == "function" then
+        pool[#pool + 1] = e.def
+      end
+    end
+    return pool
+  end
+
+  local function startAttract()
+    local pool = demoPool()
+    if #pool == 0 then return false end
+    attractPick = attractPick % #pool + 1
+    local def = pool[attractPick]
+    local mode = def.modes and def.modes[1] or nil
+    local ok, inst = pcall(def.new, api, mode)
+    if not ok or type(inst) ~= "table" then return false end
+    attract = { def = def, inst = inst, frame = 0, t = 0 }
+    return true
+  end
+
+  --- One frame of the demo. Everything is wrapped, because a game that throws
+  --- while nobody is watching must not take the launcher down with it -- it
+  --- just ends that demo and the next one starts.
+  local function attractFrame(dt)
+    local a = attract
+    a.frame = a.frame + 1
+    a.t = a.t + dt
+    local ok = pcall(a.def.demo, a.inst, a.frame)
+    if ok then ok = pcall(a.inst.update, a.inst, dt) end
+    if ok then
+      gfx.beginFrame()
+      ok = pcall(a.inst.draw, a.inst)
+      if ok then
+        gfx.center(gfx.H, " DEMO -- PRESS ANY KEY ", colors.black, colors.yellow)
+      end
+      gfx.endFrame()
+    end
+    input.endFrame()      -- keep the per-frame input state from going stale
+    if (not ok) or a.inst.finished or a.t > DEMO_SECONDS then
+      attract = nil
+    end
+  end
+
   ------------------------------------------------------------------ loop
   local FRAME = 0.08
   local timer = os.startTimer(FRAME)
@@ -9966,9 +11762,15 @@ function shell.run(api)
       audio.update(os.clock())
       if idle > IDLE_LIMIT then
         saverOn = true
-        drawSaver(FRAME)
+        if not attract then startAttract() end
+        if attract then
+          attractFrame(FRAME)
+        else
+          drawSaver(FRAME)
+        end
       else
         saverOn = false
+        attract = nil
         gfx.beginFrame()
         draw()
         gfx.endFrame()
@@ -10081,13 +11883,13 @@ local LIST_Y = 5
 local function build()
   local GROUPS = {
     ui = "Console", boot = "Console", result = "Outcomes",
-    snake = "Snake", tet = "Tetris", brk = "Breakout", inv = "Invaders",
+    snake = "Snake", tet = "Tetris", brk = "Breakout", bmb = "Bombard",
     ms = "Minesweeper", g2048 = "2048", sok = "Sokoban", fly = "Flappy",
     png = "Pong", met = "Meteors", lo = "Lights Out", sim = "Simon",
     c4 = "Connect Four",
   }
   local order = {
-    "Console", "Outcomes", "Snake", "Tetris", "Breakout", "Invaders",
+    "Console", "Outcomes", "Snake", "Tetris", "Breakout", "Bombard",
     "Minesweeper", "2048", "Sokoban", "Flappy", "Pong", "Meteors",
     "Lights Out", "Simon", "Connect Four",
   }

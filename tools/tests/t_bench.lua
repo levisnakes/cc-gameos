@@ -64,7 +64,7 @@ end
 
 ------------------------------------------------------------------ measure
 local SPECS = {
-  { "snake", 1 }, { "tetris", 1 }, { "breakout", 1 }, { "invaders", 1 },
+  { "snake", 1 }, { "tetris", 1 }, { "breakout", 1 }, { "bombard", 2 },
   { "minesweeper", 3 }, { "g2048", 1 }, { "sokoban", 1 }, { "flappy", 1 },
   { "pong", 2 }, { "meteors", 1 }, { "lightsout", 1 }, { "simon", 1 },
   { "connect4", 4 },

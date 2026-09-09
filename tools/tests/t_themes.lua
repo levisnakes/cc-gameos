@@ -14,13 +14,19 @@ check(gfx.init(), "gfx.init")
 data.load()
 audio.init()
 
+-- Discovered from the disk image the same way boot.lua does it, rather than
+-- listed by hand: a hardcoded list goes stale the moment a game is added or
+-- removed, and then fails here for a reason that has nothing to do with themes.
 local games = {}
-for _, id in ipairs({ "snake", "tetris", "breakout", "invaders", "minesweeper",
-                      "g2048", "sokoban", "flappy", "pong", "meteors" }) do
-  local def = req("games." .. id)
-  def.id = def.id or id
-  games[#games + 1] = def
+for _, file in ipairs(fs.list("/gameos/games")) do
+  if file:sub(-4) == ".lua" then
+    local id = file:sub(1, #file - 4)
+    local def = req("games." .. id)
+    def.id = def.id or id
+    games[#games + 1] = def
+  end
 end
+check(#games >= 10, "found the games on disk (" .. #games .. ")")
 table.sort(games, function(a, b) return (a.order or 50) < (b.order or 50) end)
 
 local api = {

@@ -22,6 +22,15 @@ local function knob(label, key, field, preview)
     value = function() return data.get(key) end,
     get = function() return data.get(key) .. "/10" end,
     bar = function() return data.get(key) / 10 end,
+    -- dragging the bar jumps straight to a level, which is how a volume
+    -- slider is expected to behave
+    setTo = function(v)
+      if v < 0 then v = 0 elseif v > 10 then v = 10 end
+      if v == data.get(key) then return end
+      data.set(key, v)
+      audio.volumes[field] = v / 10
+      if preview then preview(v) end
+    end,
     cycle = function(dir)
       local v = data.get(key) + dir
       if v < 0 then v = 10 elseif v > 10 then v = 0 end
@@ -96,6 +105,7 @@ function settings.run(api)
 
   local sel = 1
   local FIRST_Y = 4
+  local BAR_X = gfx.W - 20        -- must match the bar drawn below
 
   local function step(dir)
     local i = sel
@@ -131,7 +141,7 @@ function settings.run(api)
           gfx.text(4, y, row.label, fg, bg)
           if row.bar then
             -- the knob's own level, drawn behind the label
-            gfx.bar(gfx.W - 20, y, 10, row.bar(), on and gfx.contrast(colors.lightBlue) or colors.lime,
+            gfx.bar(BAR_X, y, 10, row.bar(), on and gfx.contrast(colors.lightBlue) or colors.lime,
               on and colors.lightBlue or colors.gray)
           end
           if row.get then
@@ -187,9 +197,32 @@ function settings.run(api)
         audio.play("ui.back")
         return 1
       end
-    elseif name == "mouse_click" then
+    elseif name == "mouse_scroll" then
+      -- the wheel adjusts whatever row the pointer is over
+      local _, my = ui.toLocal(ev[3], ev[4])
+      local i = my - FIRST_Y + 1
+      if rows[i] and not rows[i].spacer then
+        sel = i
+        if rows[i].cycle then
+          rows[i].cycle(ev[2] > 0 and 1 or -1)
+          audio.play("ui.move")
+        end
+      end
+    elseif name == "mouse_click" or name == "mouse_drag" then
       local mx, my = ui.toLocal(ev[3], ev[4])
       local i = my - FIRST_Y + 1
+
+      -- a click or drag anywhere along a knob's bar sets that level directly
+      if rows[i] and rows[i].setTo and mx >= BAR_X - 1 and mx < BAR_X + 10 then
+        sel = i
+        rows[i].setTo(mx - BAR_X + 1)
+        return nil
+      end
+      if name == "mouse_drag" then return nil end
+      if ev[2] == 2 then
+        audio.play("ui.back")
+        return 1
+      end
       if rows[i] and not rows[i].spacer then
         if i == sel then
           local row = rows[sel]

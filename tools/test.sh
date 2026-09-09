@@ -36,13 +36,18 @@ run "logic" tests/t_logic.lua
 run "connect four opponent" tests/t_ai.lua
 run "trophies and initials" tests/t_trophy.lua
 run "sound system" tests/t_sound.lua
+run "mouse controls" tests/t_mouse.lua
+run "bombard rules" tests/t_bombard.lua
+run "console to console" tests/t_net.lua
+run "pause guide and toasts" tests/t_pause.lua
+run "attract mode" tests/t_attract.lua
 run "soundtrack" tests/t_pianoroll.lua
 
 echo "== rendering cost =="
 run "per-frame budget" tests/t_bench.lua
 
 echo "== input fuzz (every game, every mode) =="
-for spec in "snake 3" "tetris 4" "breakout 3" "invaders 2" "minesweeper 3" \
+for spec in "snake 3" "tetris 4" "breakout 3" "bombard 4" "minesweeper 3" \
             "g2048 1" "sokoban 3" "flappy 3" "pong 4" "meteors 1" \
             "lightsout 3" "simon 3" "connect4 4"; do
   set -- $spec

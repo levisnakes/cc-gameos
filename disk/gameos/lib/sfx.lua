@@ -200,26 +200,32 @@ M["brk.life"]    = mix(
   stab("FS3", 0.75),
   shift(fall("bass", "A3", "FS3", 4, 0.08, 0.5), 0.08))
 
---============================================================== invaders
--- the march is four notes cycled by the game, so it walks down a fifth
-M["inv.march1"]  = blip("bass", "D4", 0.34)
-M["inv.march2"]  = blip("bass", "C4", 0.34)
-M["inv.march3"]  = blip("bass", "AS3", 0.34)
-M["inv.march4"]  = blip("bass", "A3", 0.34)
-M["inv.shoot"]   = mix(fall("bit", "FS5", "A4", 4, 0.022, 0.34), blip("hat", "FS5", 0.16))
-M["inv.hit"]     = mix(
-  blip("snare", 6, 0.42),
-  shift(fall("bit", "A4", "D4", 3, 0.03, 0.3), 0.02))
-M["inv.ufo"]     = { { 0, "flute", P("A4"), 0.3 }, { 0.09, "flute", P("D5"), 0.3 } }
-M["inv.ufohit"]  = mix(
-  rise("chime", "D4", "FS5", 5, 0.04, 0.5),
-  shift(blip("snare", 8, 0.4), 0))
-M["inv.bomb"]    = blip("hat", "D4", 0.16)
-M["inv.shield"]  = blip("snare", 2, 0.3)
-M["inv.die"]     = mix(
-  stab("FS3", 0.9),
-  shift(roll("snare", 4, 4, 0.08, 0.5), 0.05),
-  shift(fall("didgeridoo", "D4", "FS3", 5, 0.08, 0.5), 0.1))
+--============================================================== bombard
+-- Artillery wants weight rather than zap: a hollow thump leaving the barrel,
+-- a whistle in the air, and a real crump when it lands.
+M["bmb.aim"]     = blip("hat", "D4", 0.10)
+M["bmb.fire"]    = mix(
+  thump("basedrum", "FS3", 0.8),
+  shift(fall("didgeridoo", "D4", "FS3", 3, 0.045, 0.45), 0.03))
+M["bmb.thud"]    = mix(
+  blip("basedrum", 4, 0.5),
+  shift(fall("bass", "A3", "FS3", 2, 0.06, 0.35), 0.03))
+M["bmb.hit"]     = mix(
+  stab("FS3", 0.8),
+  shift(roll("snare", 5, 3, 0.06, 0.45), 0.03))
+M["bmb.direct"]  = mix(
+  stab("FS3", 0.95),
+  shift(roll("snare", 6, 4, 0.055, 0.5), 0.02),
+  shift(fall("didgeridoo", "D4", "FS3", 4, 0.07, 0.55), 0.06))
+M["bmb.miss"]    = fall("flute", "D5", "D4", 5, 0.05, 0.3)
+M["bmb.turn"]    = blip("pling", "D5", 0.3)
+M["bmb.connect"] = rise("bell", "D4", "D5", 4, 0.07, 0.5)
+M["bmb.win"]     = mix(
+  rise("bell", "D4", "FS5", 5, 0.08, 0.6),
+  shift(chord("harp", { "D4", "FS4", "A4" }, 0.5, 0.02), 0.24))
+M["bmb.lose"]    = mix(
+  fall("bass", "D4", "FS3", 5, 0.1, 0.55),
+  shift(blip("snare", 2, 0.35), 0.12))
 
 --============================================================== minesweeper
 M["ms.reveal"]   = blip("hat", "A4", 0.18)

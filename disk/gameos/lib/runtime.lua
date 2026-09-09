@@ -45,36 +45,167 @@ local function crash(def, err)
 end
 
 --------------------------------------------------------------- pause screen
+--- The guide, in the sense that the Xbox and the Switch use the word: the
+--- things you want mid-game without leaving the game. Volume above all --
+--- somebody walks into the room and you want it down now, not after four
+--- menus -- so the three knobs are here as sliders you nudge in place, and
+--- the trophy list is one keypress away.
+---
+--- This blocks the session loop while it is open, which is why a networked
+--- game sets suppressPause and draws its own overlay instead.
 local function pauseMenu(def, api)
   audio.play("ui.back")
+
+  local KNOBS = {
+    { label = "Master",  key = "volMaster", field = "master" },
+    { label = "Music",   key = "volMusic",  field = "music" },
+    { label = "Effects", key = "volSfx",    field = "sfx" },
+  }
+
+  -- rows: 1 Resume, 2 Restart, 3 Controls, 4 Trophies, 5..7 knobs, 8 Quit
+  local ACTIONS = { "Resume", "Restart", "Controls", "Trophies" }
+  local ROWS = #ACTIONS + #KNOBS + 1
+  local QUIT = ROWS
+
+  local X, Y, W, H = 10, 4, 32, 14
+  local FIRST = Y + 2
+  local BAR_X = X + W - 14      -- leaves room for the number after it
+  local accent = def.accent or colors.lightBlue
+  local sel = 1
+
+  local function knobAt(row)
+    local i = row - #ACTIONS
+    if i >= 1 and i <= #KNOBS then return KNOBS[i] end
+    return nil
+  end
+
+  local function setKnob(knob, value)
+    if value < 0 then value = 0 elseif value > 10 then value = 10 end
+    if value == data.get(knob.key) then return end
+    data.set(knob.key, value)
+    audio.volumes[knob.field] = value / 10
+    audio.play("ui.move")
+  end
+
+  local function nudge(knob, dir)
+    setKnob(knob, data.get(knob.key) + dir)
+  end
+
+  local function draw()
+    gfx.panel(X, Y, W, H, colors.gray, " Paused ", colors.white, accent)
+    for i = 1, #ACTIONS do
+      local y = FIRST + i - 1
+      local on = (sel == i)
+      gfx.fill(X + 1, y, W - 2, 1, on and accent or colors.gray)
+      gfx.text(X + 2, y, ACTIONS[i],
+        on and gfx.contrast(accent) or colors.white, on and accent or colors.gray)
+    end
+    for i = 1, #KNOBS do
+      local row = #ACTIONS + i
+      local y = FIRST + row - 1
+      local on = (sel == row)
+      local bg = on and accent or colors.gray
+      gfx.fill(X + 1, y, W - 2, 1, bg)
+      gfx.text(X + 2, y, KNOBS[i].label, on and gfx.contrast(accent) or colors.white, bg)
+      -- Three bars stacked with nothing between them read as one slab, so
+      -- each carries its number: that is what makes a level legible at a
+      -- glance rather than something you have to measure.
+      local level = data.get(KNOBS[i].key)
+      gfx.bar(BAR_X, y, 10, level / 10,
+        on and gfx.contrast(accent) or colors.lime, on and accent or colors.black)
+      gfx.right(X + W - 2, y, string.format("%2d", level),
+        on and gfx.contrast(accent) or colors.white, bg)
+    end
+    local y = FIRST + QUIT - 1
+    local on = (sel == QUIT)
+    gfx.fill(X + 1, y, W - 2, 1, on and colors.red or colors.gray)
+    gfx.text(X + 2, y, "Quit to menu",
+      on and colors.white or colors.lightGray, on and colors.red or colors.gray)
+    gfx.center(Y + H - 1, gfx.clip(def.name, W - 4), colors.lightGray, colors.gray, X, W)
+  end
+
+  --- Screens are opened by the loop below rather than from inside the event
+  --- handler: ui.loop nested inside another ui.loop's handler would swallow
+  --- the outer loop's pump timer, and the outer loop would quietly stop
+  --- driving the music.
+  local function activate()
+    if sel == 1 then return "resume" end
+    if sel == 2 then return "restart" end
+    if sel == 3 then return "controls" end
+    if sel == 4 then return "trophies" end
+    if sel == QUIT then return "quit" end
+    local knob = knobAt(sel)
+    if knob then nudge(knob, 1) end
+    return nil
+  end
+
+  local function handle(ev)
+    local name = ev[1]
+    if name == "key" then
+      local k = ev[2]
+      if k == keys.up or k == keys.w then
+        sel = sel > 1 and sel - 1 or ROWS
+        audio.play("ui.move")
+      elseif k == keys.down or k == keys.s then
+        sel = sel < ROWS and sel + 1 or 1
+        audio.play("ui.move")
+      elseif k == keys.left or k == keys.a then
+        local knob = knobAt(sel)
+        if knob then nudge(knob, -1) end
+      elseif k == keys.right or k == keys.d then
+        local knob = knobAt(sel)
+        if knob then nudge(knob, 1) end
+      elseif k == keys.enter or k == keys.space or k == keys.numPadEnter then
+        return activate()
+      elseif k == keys.p or k == keys.q or k == keys.backspace then
+        return "resume"
+      end
+
+    elseif name == "mouse_scroll" then
+      local _, my = ui.toLocal(ev[3], ev[4])
+      local row = my - FIRST + 1
+      local knob = knobAt(row)
+      if knob then
+        sel = row
+        nudge(knob, ev[2] > 0 and 1 or -1)
+      end
+
+    elseif name == "mouse_click" or name == "mouse_drag" then
+      local mx, my = ui.toLocal(ev[3], ev[4])
+      local row = my - FIRST + 1
+      local knob = knobAt(row)
+      -- clicking or dragging along a bar sets that level directly
+      if knob and mx >= BAR_X - 1 and mx < BAR_X + 10 then
+        sel = row
+        setKnob(knob, mx - BAR_X + 1)
+        return nil
+      end
+      if name == "mouse_drag" then return nil end
+      if ev[2] == 2 then return "resume" end
+      if row >= 1 and row <= ROWS and mx > X and mx < X + W - 1 then
+        if row == sel then return activate() end
+        sel = row
+        audio.play("ui.move")
+      elseif mx < X or mx >= X + W or my < Y or my >= Y + H then
+        return "resume"
+      end
+    end
+    return nil
+  end
+
   while true do
-    local items = {
-      { label = "Resume" },
-      { label = "Restart" },
-      { label = "Controls" },
-      { label = "Volume", hint = math.floor(audio.volumes.master * 10) .. "/10" },
-      { label = "Quit to menu" },
-    }
-    local pick = ui.picker({
-      title = " Paused ",
-      items = items,
-      accent = def.accent or colors.lightBlue,
-      width = 28,
-      footer = def.name,
-    })
-    if pick == 0 or pick == 1 then return "resume" end
-    if pick == 2 then return "restart" end
-    if pick == 3 then
+    local result = ui.loop(draw, handle)
+    if ui.terminated then return "quit" end
+    if result == "controls" then
       ui.controls(def)
-    elseif pick == 4 then
-      -- step the master knob down and wrap, so it is adjustable mid-game
-      local step = math.floor(audio.volumes.master * 10 + 0.5) - 2
-      if step < 0 then step = 10 end
-      audio.volumes.master = step / 10
-      data.set("volMaster", step)
-      audio.play("ui.select")
-    elseif pick == 5 then
-      return "quit"
+    elseif result == "trophies" then
+      api.require("os.trophies").run(api)
+    elseif result == "restart" or result == "quit" then
+      data.flush()
+      return result
+    else
+      data.flush()
+      return "resume"          -- "resume", 0 from a cancel, or anything odd
     end
     if ui.terminated then return "quit" end
   end
@@ -119,6 +250,71 @@ local function awardTrophies(def, inst, api)
   end
   for _, entry in ipairs(GLOBAL) do consider(entry, api) end
   return won
+end
+
+---------------------------------------------------------------- trophy toast
+--- Consoles announce an achievement the moment it happens, not in a summary
+--- afterwards, because the announcement is the reward. GameOS used to list
+--- them only on the game-over card, which meant a trophy earned in the first
+--- minute went unmentioned until the run was over.
+---
+--- awardTrophies is already idempotent -- it skips anything held -- so it can
+--- simply be run during play and whatever it returns is newly earned.
+local TROPHY_ICON = gfx.makeGlyph({
+  "..######..",
+  "..######..",
+  "#..####..#",
+  "#..####..#",
+  ".#.####.#.",
+  "...####...",
+  "..######..",
+  ".########.",
+})
+
+local Toasts = {}
+Toasts.__index = Toasts
+
+local function newToasts()
+  return setmetatable({ queue = {}, showing = nil, t = 0 }, Toasts)
+end
+
+function Toasts:add(entry) self.queue[#self.queue + 1] = entry end
+
+function Toasts:update(dt)
+  if not self.showing then
+    if #self.queue == 0 then return end
+    self.showing = table.remove(self.queue, 1)
+    self.t = 0
+    audio.play("ui.trophy")
+    return
+  end
+  self.t = self.t + dt
+  if self.t > 3.0 then
+    self.showing = nil
+    self.t = 0
+  end
+end
+
+function Toasts:draw()
+  local entry = self.showing
+  if not entry then return end
+  local w = 24
+  -- slide in, hold, slide out, so it never simply blinks into existence
+  local slide
+  if self.t < 0.25 then
+    slide = 1 - self.t / 0.25
+  elseif self.t > 2.75 then
+    slide = (self.t - 2.75) / 0.25
+  else
+    slide = 0
+  end
+  local x = gfx.W - w + floor(slide * (w + 1) + 0.5)
+  if x > gfx.W then return end
+
+  gfx.fill(x, 2, w, 4, colors.gray)
+  gfx.blitGlyph(x + 1, 3, TROPHY_ICON, colors.yellow, colors.gray)
+  gfx.text(x + 7, 3, gfx.clip("TROPHY", w - 8), colors.yellow, colors.gray)
+  gfx.text(x + 7, 4, gfx.clip(entry.name, w - 8), colors.white, colors.gray)
 end
 
 ------------------------------------------------------------ game over card
@@ -285,6 +481,26 @@ local function session(def, api, mode)
   local fpsAcc, fpsFrames, fps = 0, 0, 0
   local outcome = nil
 
+  --- Every way out of the loop below has to release whatever the game took
+  --- hold of. That matters most for a networked match: leaving without
+  --- disposing keeps the modem channels open and, worse, denies the other
+  --- console the goodbye that would end its match cleanly instead of after a
+  --- five second timeout.
+  local released = false
+  local function release()
+    if released then return end       -- disposing twice would be a surprise
+    released = true
+    if inst.dispose then pcall(inst.dispose, inst) end
+  end
+  local function bail(err)
+    release()
+    return crash(def, err)
+  end
+
+  local toasts = newToasts()
+  local trophyTimer = 0
+  local earned = {}          -- everything won this session, for the card
+
   while not outcome do
     local ev = { os.pullEventRaw() }
     local name = ev[1]
@@ -299,13 +515,26 @@ local function session(def, api, mode)
       audio.update(nowClock)
 
       local uok, uerr = pcall(inst.update, inst, dt)
-      if not uok then return crash(def, uerr) end
+      if not uok then return bail(uerr) end
+
+      -- Twice a second is often enough to feel immediate and rare enough
+      -- that the predicates cost nothing.
+      trophyTimer = trophyTimer + dt
+      if trophyTimer >= 0.5 then
+        trophyTimer = 0
+        local fresh = awardTrophies(def, inst, api)
+        for i = 1, #fresh do
+          earned[#earned + 1] = fresh[i]
+          toasts:add(fresh[i])
+        end
+      end
+      toasts:update(dt)
 
       gfx.beginFrame()
       local dok, derr = pcall(inst.draw, inst)
       if not dok then
         gfx.endFrame()
-        return crash(def, derr)
+        return bail(derr)
       end
       if showFps then
         fpsAcc = fpsAcc + dt
@@ -316,6 +545,7 @@ local function session(def, api, mode)
         end
         gfx.right(gfx.W, 1, string.format("%2d", fps), colors.lime, colors.black)
       end
+      toasts:draw()
       gfx.endFrame()
       input.endFrame()
 
@@ -327,13 +557,18 @@ local function session(def, api, mode)
 
     elseif name == "key" then
       local k, held = ev[2], ev[3]
-      if k == keys.p and not held then
+      -- A networked game cannot afford a blocking pause menu: the event loop
+      -- stops, heartbeats stop with it, and the other console decides we
+      -- dropped out. Such a game sets suppressPause and draws its own overlay
+      -- instead, which keeps the link alive.
+      if k == keys.p and not held and not inst.suppressPause then
         local choice = pauseMenu(def, api)
         input.reset()
         os.cancelTimer(timer)
         timer = os.startTimer(TICK)
         last = os.clock()
         if choice == "restart" then
+          release()
           return "retry"
         elseif choice == "quit" then
           outcome = "abandon"
@@ -342,7 +577,7 @@ local function session(def, api, mode)
         input.onKey(k, held)
         if inst.onKey then
           local kok, kerr = pcall(inst.onKey, inst, k, held)
-          if not kok then return crash(def, kerr) end
+          if not kok then return bail(kerr) end
         end
       end
 
@@ -358,7 +593,7 @@ local function session(def, api, mode)
       input.onMouse(name, ev[2], mx, my)
       if inst.onMouse then
         local mok, merr = pcall(inst.onMouse, inst, name, ev[2], mx, my)
-        if not mok then return crash(def, merr) end
+        if not mok then return bail(merr) end
       end
 
     elseif name == "mouse_scroll" then
@@ -366,24 +601,42 @@ local function session(def, api, mode)
       if inst.onMouse then pcall(inst.onMouse, inst, "mouse_scroll", ev[2], mx, my) end
 
     elseif name == "monitor_touch" then
+      -- A touch has no press-and-release pair, so send both halves at once:
+      -- games that wait for the release (2048's swipe) would otherwise never
+      -- see the gesture finish on an advanced monitor.
       local mx, my = ui.toLocal(ev[3], ev[4])
       input.onMouse("mouse_click", 1, mx, my)
-      if inst.onMouse then pcall(inst.onMouse, inst, "mouse_click", 1, mx, my) end
+      if inst.onMouse then
+        pcall(inst.onMouse, inst, "mouse_click", 1, mx, my)
+        pcall(inst.onMouse, inst, "mouse_up", 1, mx, my)
+      end
 
     elseif name == "term_resize" then
       if not gfx.handleResize() then outcome = "abandon" end
 
     elseif name == "terminate" then
       outcome = "abandon"
+
+    elseif inst.onEvent then
+      -- Anything the console itself does not consume -- modem traffic above
+      -- all -- is offered to the game whole.
+      local eok, eerr = pcall(inst.onEvent, inst, ev)
+      if not eok then return bail(eerr) end
     end
   end
 
   os.cancelTimer(timer)
+  -- Give the game a chance to let go of anything outside itself -- an open
+  -- modem channel, above all -- before the session is torn down.
+  release()
   audio.stopMusic()
   local elapsed = os.clock() - startClock
   data.recordPlay(def.id, elapsed)
 
+  -- Anything the periodic check has not seen yet -- a trophy for finishing,
+  -- above all -- plus everything already toasted, so the card is complete.
   local trophies = awardTrophies(def, inst, api)
+  for i = 1, #earned do trophies[#trophies + 1] = earned[i] end
 
   if outcome == "abandon" then
     data.flush()

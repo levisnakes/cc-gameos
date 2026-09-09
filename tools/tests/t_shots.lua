@@ -139,24 +139,18 @@ do
   shot("breakout", b)
 end
 
-------------------------------------------------------------------- invaders
+-------------------------------------------------------------------- bombard
 do
-  local _, v = make("invaders", 1)
-  run(v, 200, function(inst, f)
-    local target
-    for i = 1, #inst.aliens do
-      local a = inst.aliens[i]
-      if a.alive and (not target or a.y > target.y) then target = a end
+  -- A few turns in, so the showcase frame has a chewed-up hill rather than a
+  -- pristine one.
+  local def = req("games.bombard")
+  local v = def.new(api, { id = "normal", cpu = "normal", tries = 30, error = 8, seed = 8899 })
+  run(v, 1200, function(inst)
+    if inst.phase == "aim" and inst.turn == 1 and inst.shots[1] < 4 then
+      inst:fire(46 + math.random() * 16, 62 + math.random() * 14)
     end
-    if target then
-      hold(keys.left, target.x + 4 < inst.playerX + 4)
-      hold(keys.right, target.x + 4 > inst.playerX + 4)
-    end
-    if f % 8 == 0 then tap(inst, keys.space) end
   end)
-  hold(keys.left, false)
-  hold(keys.right, false)
-  shot("invaders", v)
+  shot("bombard", v)
 end
 
 ---------------------------------------------------------------- minesweeper

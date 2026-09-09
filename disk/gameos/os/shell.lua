@@ -12,6 +12,7 @@ local font = req("lib.font")
 local audio = req("lib.audio")
 local data = req("lib.data")
 local ui = req("lib.ui")
+local input = req("lib.input")   -- attract mode drives real game frames
 
 local shell = {}
 
@@ -146,6 +147,8 @@ function shell.run(api)
   local saverOn = false
   local saverX, saverY, saverVX, saverVY = 10, 10, 26, 15
   local saverHue = 1
+  local attract = nil          -- the demo currently playing itself
+  local attractPick = 0
 
   local function clampView()
     if sel < top then top = sel end
@@ -312,6 +315,63 @@ function shell.run(api)
     gfx.endFrame()
   end
 
+  -------------------------------------------------------------- attract mode
+  --- What an arcade cabinet does when nobody is standing at it: play itself.
+  --- A game opts in by exporting a `demo(inst, frame)` bot; anything without
+  --- one is simply never chosen, and if no game has one the old bouncing
+  --- logo takes over instead.
+  ---
+  --- The instance is built directly rather than through runtime.play, so no
+  --- score is recorded, no trophy is awarded and nothing is saved: a demo is
+  --- a picture of a game, not a session.
+  local DEMO_SECONDS = 22
+
+  local function demoPool()
+    local pool = {}
+    for i = 1, #entries do
+      local e = entries[i]
+      if e.kind == "game" and type(e.def.demo) == "function" then
+        pool[#pool + 1] = e.def
+      end
+    end
+    return pool
+  end
+
+  local function startAttract()
+    local pool = demoPool()
+    if #pool == 0 then return false end
+    attractPick = attractPick % #pool + 1
+    local def = pool[attractPick]
+    local mode = def.modes and def.modes[1] or nil
+    local ok, inst = pcall(def.new, api, mode)
+    if not ok or type(inst) ~= "table" then return false end
+    attract = { def = def, inst = inst, frame = 0, t = 0 }
+    return true
+  end
+
+  --- One frame of the demo. Everything is wrapped, because a game that throws
+  --- while nobody is watching must not take the launcher down with it -- it
+  --- just ends that demo and the next one starts.
+  local function attractFrame(dt)
+    local a = attract
+    a.frame = a.frame + 1
+    a.t = a.t + dt
+    local ok = pcall(a.def.demo, a.inst, a.frame)
+    if ok then ok = pcall(a.inst.update, a.inst, dt) end
+    if ok then
+      gfx.beginFrame()
+      ok = pcall(a.inst.draw, a.inst)
+      if ok then
+        gfx.center(gfx.H, " DEMO -- PRESS ANY KEY ", colors.black, colors.yellow)
+      end
+      gfx.endFrame()
+    end
+    input.endFrame()      -- keep the per-frame input state from going stale
+    if (not ok) or a.inst.finished or a.t > DEMO_SECONDS then
+      attract = nil
+    end
+  end
+
   ------------------------------------------------------------------ loop
   local FRAME = 0.08
   local timer = os.startTimer(FRAME)
@@ -380,9 +440,15 @@ function shell.run(api)
       audio.update(os.clock())
       if idle > IDLE_LIMIT then
         saverOn = true
-        drawSaver(FRAME)
+        if not attract then startAttract() end
+        if attract then
+          attractFrame(FRAME)
+        else
+          drawSaver(FRAME)
+        end
       else
         saverOn = false
+        attract = nil
         gfx.beginFrame()
         draw()
         gfx.endFrame()

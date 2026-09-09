@@ -632,6 +632,24 @@ local function cover(c, t)
 end
 
 ----------------------------------------------------------------- definition
+--- Attract-mode bot: keep the paddle under the lowest ball, and let anything
+--- stuck go. Deliberately a little late, so the demo has near misses in it.
+local function demo(self, frame)
+  if self.finished then return end
+  local target = nil
+  local stuck = false
+  for _, b in ipairs(self.balls) do
+    if b.stuck then stuck = true end
+    if not target or b.y > target.y then target = b end
+  end
+  if stuck then self:release() end
+  if target then
+    self.mouseTarget = target.x - self.paddleW / 2 +
+      (frame % 60 < 30 and 2 or -2)
+  end
+  if frame % 25 == 0 then self:fire() end
+end
+
 return {
   id = "breakout",
   name = "Breakout",
@@ -659,5 +677,6 @@ return {
     { id = "brk_clear", name = "Clean Sweep", desc = "Clear every wall",
       test = function(g) return g.won end },
   },
+  demo = demo,
   new = new,
 }

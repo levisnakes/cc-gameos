@@ -14,14 +14,18 @@ check(gfx.init(), "gfx.init")
 data.load()
 audio.init()
 
+-- Discovered from disk rather than listed here, so adding or removing a game
+-- cannot leave this test referring to something that no longer exists.
 local games = {}
-for _, id in ipairs({ "snake", "tetris", "breakout", "invaders", "minesweeper",
-                      "g2048", "sokoban", "flappy", "pong", "meteors",
-                      "lightsout", "simon", "connect4" }) do
-  local def = req("games." .. id)
-  def.id = def.id or id
-  games[#games + 1] = def
+for _, file in ipairs(fs.list("/gameos/games")) do
+  if file:sub(-4) == ".lua" then
+    local id = file:sub(1, #file - 4)
+    local def = req("games." .. id)
+    def.id = def.id or id
+    games[#games + 1] = def
+  end
 end
+check(#games >= 10, "found the games on disk (" .. #games .. ")")
 table.sort(games, function(a, b) return (a.order or 50) < (b.order or 50) end)
 
 local api = {

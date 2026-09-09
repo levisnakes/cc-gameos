@@ -476,6 +476,49 @@ function Game:onKey(code, held)
   end
 end
 
+--- Where the piece's cells actually sit, which is what the pointer should
+--- line up with -- the bounding-box origin is off-centre for most shapes.
+function Game:pieceSpan()
+  local shape = SHAPES[self.kind][self.rot + 1]
+  local lo, hi = 99, -99
+  for i = 1, 4 do
+    local x = self.px + shape[i][1]
+    if x < lo then lo = x end
+    if x > hi then hi = x end
+  end
+  return lo, hi
+end
+
+--- Mouse play: click a column in the well to slide the piece there, scroll to
+--- rotate, and click below the well to hard drop. The slide is a target
+--- rather than a teleport so the piece still has to travel past obstacles.
+function Game:onMouse(kind, btn, x, y)
+  if self.finished or self.clearRows or not self.kind then return end
+  local px = (x - 1) * 2 + 1
+  local py = (y - 1) * 3 + 1
+
+  if kind == "mouse_scroll" then
+    self:rotate(btn > 0 and 1 or -1)
+    return
+  end
+  if kind ~= "mouse_click" and kind ~= "mouse_drag" then return end
+
+  if btn == 2 then
+    self:swapHold()
+    return
+  end
+  -- below the floor of the well: drop it
+  if kind == "mouse_click" and py >= WELL_Y + VISIBLE * BH then
+    self:hardDrop()
+    return
+  end
+
+  local col = floor((px - WELL_X) / BW) + 1
+  if col < 1 then col = 1 elseif col > COLS then col = COLS end
+  local lo, hi = self:pieceSpan()
+  self.mouseCol = col - floor((hi - lo) / 2)
+end
+
 function Game:update(dt)
   if self.finished then return end
 
@@ -483,6 +526,29 @@ function Game:update(dt)
     self.clearTimer = self.clearTimer - dt
     if self.clearTimer <= 0 then self:collapse() end
     return
+  end
+
+  -- walk toward a clicked column, one cell per gravity-independent tick, and
+  -- give up the moment the piece cannot get any closer (a wall or a stack)
+  if self.mouseCol then
+    self.mouseTimer = (self.mouseTimer or 0) + dt
+    while self.mouseTimer > 0.03 do
+      self.mouseTimer = self.mouseTimer - 0.03
+      local lo = self:pieceSpan()
+      local d = self.mouseCol - lo
+      if d == 0 then
+        self.mouseCol = nil
+        break
+      end
+      if not self:tryMove(d > 0 and 1 or -1, 0) then
+        self.mouseCol = nil
+        break
+      end
+      audio.play("tet.move")
+    end
+  end
+  if input.down(keys.left, keys.a) or input.down(keys.right, keys.d) then
+    self.mouseCol = nil
   end
 
   local steps = self.dasLeft:update(input.down(keys.left, keys.a), dt)
@@ -699,6 +765,8 @@ return {
     { "Z", "Rotate left" },
     { "Space", "Hard drop" },
     { "C or Shift", "Hold piece" },
+    { "Mouse", "Click a column, scroll to spin" },
+    { "Click below well", "Hard drop" },
     { "P", "Pause menu" },
   },
   modes = {

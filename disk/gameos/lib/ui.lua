@@ -149,7 +149,19 @@ function ui.dialog(opts)
           return opts.cancel or 0
         end
       end
+    elseif name == "mouse_scroll" then
+      local dir = ev[2]
+      local n = sel + dir
+      if n >= 1 and n <= #buttons then
+        sel = n
+        audio.play("ui.move")
+      end
     elseif name == "mouse_click" then
+      -- right-click reads as "back" everywhere in the interface
+      if ev[2] == 2 and opts.cancel ~= 0 then
+        audio.play("ui.back")
+        return opts.cancel or 0
+      end
       local mx, my = ui.toLocal(ev[3], ev[4])
       local i = hitTest(rects, mx, my)
       if i then
@@ -284,6 +296,10 @@ function ui.picker(opts)
       local dir = ev[2]
       sel = math.min(#items, math.max(1, sel + dir))
     elseif name == "mouse_click" then
+      if ev[2] == 2 then
+        audio.play("ui.back")
+        return 0
+      end
       local mx, my = ui.toLocal(ev[3], ev[4])
       local row = my - (y + 2)
       if row >= 0 and row < rows and mx >= x and mx < x + w then

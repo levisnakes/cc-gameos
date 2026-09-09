@@ -78,9 +78,35 @@ do
       end
     end
   end
+  -- Every effect has to fall into a named group on the sound test screen.
+  -- When Invaders was replaced, its "Invaders" heading stayed behind with
+  -- nothing under it while Bombard's sounds landed in "Other" -- a wrong
+  -- screen that no other test could see.
+  do
+    local src = fs.open("/gameos/os/soundtest.lua", "r")
+    local body = src.readAll()
+    src.close()
+    -- only the GROUPS table, not every string assignment in the file, or an
+    -- unrelated local could accidentally "map" a prefix and hide a stray
+    local groups = body:match("local GROUPS = {(.-)}")
+    check(groups ~= nil, "found the GROUPS table in soundtest.lua")
+    local mapped = {}
+    for prefix in (groups or ""):gmatch("([%w_]+)%s*=") do mapped[prefix] = true end
+    local unmapped = {}
+    for _, name in ipairs(sfx.names()) do
+      local prefix = name:match("^([^.]+)")
+      if prefix and not mapped[prefix] then unmapped[prefix] = true end
+    end
+    local stray = {}
+    for prefix in pairs(unmapped) do stray[#stray + 1] = prefix end
+    table.sort(stray)
+    check(#stray == 0, "every sound belongs to a named group on the sound test" ..
+      (#stray > 0 and (" (stray: " .. table.concat(stray, ", ") .. ")") or ""))
+  end
+
   -- the families built by concatenation
   for _, family in ipairs({
-    { "inv.march", 4 }, { "met.rock", 3 }, { "sim.pad", 4 },
+    { "met.rock", 3 }, { "sim.pad", 4 },
     { "tet.line", 3 },
   }) do
     for i = 1, family[2] do

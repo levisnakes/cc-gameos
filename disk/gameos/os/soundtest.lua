@@ -22,13 +22,13 @@ local LIST_Y = 5
 local function build()
   local GROUPS = {
     ui = "Console", boot = "Console", result = "Outcomes",
-    snake = "Snake", tet = "Tetris", brk = "Breakout", inv = "Invaders",
+    snake = "Snake", tet = "Tetris", brk = "Breakout", bmb = "Bombard",
     ms = "Minesweeper", g2048 = "2048", sok = "Sokoban", fly = "Flappy",
     png = "Pong", met = "Meteors", lo = "Lights Out", sim = "Simon",
     c4 = "Connect Four",
   }
   local order = {
-    "Console", "Outcomes", "Snake", "Tetris", "Breakout", "Invaders",
+    "Console", "Outcomes", "Snake", "Tetris", "Breakout", "Bombard",
     "Minesweeper", "2048", "Sokoban", "Flappy", "Pong", "Meteors",
     "Lights Out", "Simon", "Connect Four",
   }

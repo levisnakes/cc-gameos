@@ -314,6 +314,23 @@ local function cover(c, t)
 end
 
 ----------------------------------------------------------------- definition
+--- Attract-mode bot: aim for the middle of the next gap and flap when below
+--- it. The lookahead is deliberately short, so it clips a pipe eventually.
+local function demo(self, frame)
+  if self.finished then return end
+  if self.state == "ready" then
+    self:flap()
+    return
+  end
+  local target = 22
+  local nearest
+  for _, p in ipairs(self.pipes) do
+    if p.x + 8 > 20 and (not nearest or p.x < nearest.x) then nearest = p end
+  end
+  if nearest then target = nearest.gapY + self.gap / 2 end
+  if self.y > target + 1 and self.vy > -8 then self:flap() end
+end
+
 return {
   id = "flappy",
   name = "Flappy",
@@ -341,5 +358,6 @@ return {
     { id = "fl_insane", name = "Threading It", desc = "Clear 10 pipes on Insane",
       test = function(g) return g.score >= 10 and g.gap <= 13 end },
   },
+  demo = demo,
   new = new,
 }
